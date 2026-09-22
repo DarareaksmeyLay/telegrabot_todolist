@@ -17,7 +17,6 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ Completed", callback_data="menu:completed")
         ],
         [
-            InlineKeyboardButton("⚙️ Settings", callback_data="menu:settings"),
             InlineKeyboardButton("🚪 Exit", callback_data="menu:exit")
         ]
     ]

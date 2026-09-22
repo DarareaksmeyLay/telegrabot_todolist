@@ -9,18 +9,18 @@ from __future__ import annotations
 import logging
 import sys
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import config
 from database import check_supabase_connection
 from handlers import (
     get_start_handler,
+    get_help_handler,
     get_menu_handlers,
     get_tasks_handlers,
     get_create_task_handler,
     get_edit_task_handlers,
-    get_completed_handlers,
-    get_settings_handlers
+    get_completed_handlers
 )
 
 # Setup professional logging format
@@ -55,6 +55,40 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
                 pass
 
 
+async def track_incoming_user_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Group -1 message tracker handler to capture all user message IDs in context.user_data."""
+    if update.effective_user and update.effective_message:
+        msg_id = update.effective_message.message_id
+        
+        # We only want to track actual user-sent messages (not callbacks, errors, etc.)
+        if update.message or update.edited_message:
+            if "menu_messages" not in context.user_data:
+                context.user_data["menu_messages"] = []
+            if msg_id not in context.user_data["menu_messages"]:
+                context.user_data["menu_messages"].append(msg_id)
+
+
+def patch_bot_send_message(application: Application) -> None:
+    """Monkey-patch application.bot.send_message to automatically log all bot-sent messages."""
+    original_send_message = application.bot.send_message
+
+    async def tracked_send_message(chat_id, *args, **kwargs):
+        msg = await original_send_message(chat_id, *args, **kwargs)
+        try:
+            if isinstance(chat_id, int):
+                user_data = application.user_data.get(chat_id)
+                if user_data is not None:
+                    if "menu_messages" not in user_data:
+                        user_data["menu_messages"] = []
+                    if msg.message_id not in user_data["menu_messages"]:
+                        user_data["menu_messages"].append(msg.message_id)
+        except Exception as exc:
+            logger.warning("Failed to track bot-sent message ID: %s", exc)
+        return msg
+
+    application.bot.send_message = tracked_send_message
+
+
 def main() -> None:
     """Bootstraps and runs the Telegram Bot."""
     logger.info("Starting %s telegram bot...", config.bot_name)
@@ -67,11 +101,18 @@ def main() -> None:
     # 2. Build the Application
     application = Application.builder().token(config.telegram_bot_token).build()
 
+    # Apply bot message tracking patch
+    patch_bot_send_message(application)
+
     # 3. Register Central Error Handler
     application.add_error_handler(error_handler)
 
     # 4. Attach Command & Callback Handlers
+    # Register background user-message tracker in group -1
+    application.add_handler(MessageHandler(filters.ALL, track_incoming_user_messages), group=-1)
+
     application.add_handler(get_start_handler())
+    application.add_handler(get_help_handler())
     application.add_handler(get_create_task_handler())
     
     # Edit task contains a ConversationHandler that needs to be registered before general callbacks
@@ -86,9 +127,6 @@ def main() -> None:
         
     for task_handler in get_tasks_handlers():
         application.add_handler(task_handler)
-
-    for settings_handler in get_settings_handlers():
-        application.add_handler(settings_handler)
 
     # 5. Initialize background reminder scheduler
     if application.job_queue:

@@ -198,36 +198,46 @@ async def timezone_change_callback(update: Update, context: ContextTypes.DEFAULT
 
 @authorized_only
 async def menu_exit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Close the menu and show an informative goodbye message confirming reminders stay active using ForceReply."""
+    """Close the menu, clear all tracked chat messages, and show a clean informative goodbye message."""
     query = update.callback_query
     await query.answer()
 
-    # 1. Delete the active menu interface message
-    try:
-        await query.message.delete()
-    except Exception as exc:
-        logger.warning("Could not delete menu message: %s", exc)
+    # 1. Fetch all tracked message IDs for this session
+    menu_messages = context.user_data.get("menu_messages", [])
+    chat_id = query.message.chat_id
+
+    # 2. Iterate and delete all logged messages to completely clean the chat history of this session
+    logger.info("Exiting: Clearing %d tracked chat messages for user %s...", len(menu_messages), chat_id)
+    for msg_id in list(menu_messages):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            # Ignore messages already deleted or older than 48 hours
+            pass
+
+    # Clear the tracking list
+    context.user_data["menu_messages"] = []
 
     text = (
         "👋 <b>Closed To-Do Assistant</b>\n"
         "──────────────────\n\n"
-        "You have stopped active usage of the menu dashboard. The menu interface is now closed.\n\n"
-        "⚠️ <b>Important Note:</b> Even though you have closed this dashboard menu, "
+        "All active menu screens and intermediate inputs have been cleared from this chat!\n\n"
+        "⚠️ <b>Reminder Status:</b> Even though you have closed this dashboard, "
         "your scheduled task reminders, alerts, and overdue notifications are <b>fully active</b> "
         "and will continue to notify you in this chat exactly at your set times!\n\n"
         "To open the menu dashboard again at any time, just type /start."
     )
 
-    # 2. Send a fresh message with ForceReply to focus input and keep responsive
+    # 3. Send a single clean goodbye message with ForceReply to keep the bot responsive
     try:
         await context.bot.send_message(
-            chat_id=query.message.chat_id,
+            chat_id=chat_id,
             text=text,
             reply_markup=ForceReply(selective=True, placeholder="Type /start to open the menu..."),
             parse_mode="HTML"
         )
     except Exception as exc:
-        logger.error("Failed to send exit message with ForceReply: %s", exc)
+        logger.error("Failed to send clean exit message: %s", exc)
 
 
 def get_menu_handlers() -> list[CallbackQueryHandler]:
