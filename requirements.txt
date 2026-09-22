@@ -3,7 +3,6 @@ python-telegram-bot[job-queue]>=21.6
 
 # Database & Supabase SDK
 supabase>=2.10.0
-postgrest>=0.17.0
 
 # Environment and Configuration
 python-dotenv>=1.0.1

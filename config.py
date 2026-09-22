@@ -98,6 +98,12 @@ def load_config() -> Config:
     """Load configuration from environment with thorough validation."""
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     supabase_url = os.getenv("SUPABASE_URL", "").strip()
+    # Auto-sanitize URL to prevent double rest/v1 path issues
+    if supabase_url.endswith("/rest/v1"):
+        supabase_url = supabase_url[:-8]
+    elif supabase_url.endswith("/rest/v1/"):
+        supabase_url = supabase_url[:-9]
+    supabase_url = supabase_url.rstrip("/")
     supabase_key = os.getenv("SUPABASE_KEY", "").strip()
     raw_allowed_ids = os.getenv("ALLOWED_TELEGRAM_USER_IDS", "").strip()
     default_tz = os.getenv("DEFAULT_TIMEZONE", "Asia/Phnom_Penh").strip()

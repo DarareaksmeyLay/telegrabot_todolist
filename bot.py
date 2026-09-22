@@ -19,7 +19,8 @@ from handlers import (
     get_tasks_handlers,
     get_create_task_handler,
     get_edit_task_handlers,
-    get_completed_handlers
+    get_completed_handlers,
+    get_settings_handlers
 )
 
 # Setup professional logging format
@@ -85,6 +86,9 @@ def main() -> None:
         
     for task_handler in get_tasks_handlers():
         application.add_handler(task_handler)
+
+    for settings_handler in get_settings_handlers():
+        application.add_handler(settings_handler)
 
     # 5. Initialize background reminder scheduler
     if application.job_queue:

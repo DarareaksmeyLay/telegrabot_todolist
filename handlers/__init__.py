@@ -5,6 +5,7 @@ from .tasks import get_tasks_handlers
 from .create_task import get_create_task_handler
 from .edit_task import get_edit_task_handlers
 from .completed import get_completed_handlers
+from .settings import get_settings_handlers
 
 __all__ = [
     "get_start_handler",
@@ -12,6 +13,7 @@ __all__ = [
     "get_tasks_handlers",
     "get_create_task_handler",
     "get_edit_task_handlers",
-    "get_completed_handlers"
+    "get_completed_handlers",
+    "get_settings_handlers"
 ]
 
