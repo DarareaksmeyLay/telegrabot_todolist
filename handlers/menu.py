@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.ext import CallbackQueryHandler, ContextTypes
 
 from services import get_or_create_user, count_dashboard_stats
@@ -196,6 +196,40 @@ async def timezone_change_callback(update: Update, context: ContextTypes.DEFAULT
         logger.error("Failed to edit settings menu after update: %s", exc)
 
 
+@authorized_only
+async def menu_exit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Close the menu and show an informative goodbye message confirming reminders stay active using ForceReply."""
+    query = update.callback_query
+    await query.answer()
+
+    # 1. Delete the active menu interface message
+    try:
+        await query.message.delete()
+    except Exception as exc:
+        logger.warning("Could not delete menu message: %s", exc)
+
+    text = (
+        "👋 <b>Closed To-Do Assistant</b>\n"
+        "──────────────────\n\n"
+        "You have stopped active usage of the menu dashboard. The menu interface is now closed.\n\n"
+        "⚠️ <b>Important Note:</b> Even though you have closed this dashboard menu, "
+        "your scheduled task reminders, alerts, and overdue notifications are <b>fully active</b> "
+        "and will continue to notify you in this chat exactly at your set times!\n\n"
+        "To open the menu dashboard again at any time, just type /start."
+    )
+
+    # 2. Send a fresh message with ForceReply to focus input and keep responsive
+    try:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=text,
+            reply_markup=ForceReply(selective=True, placeholder="Type /start to open the menu..."),
+            parse_mode="HTML"
+        )
+    except Exception as exc:
+        logger.error("Failed to send exit message with ForceReply: %s", exc)
+
+
 def get_menu_handlers() -> list[CallbackQueryHandler]:
     """Return list of callback handlers for main menu routes."""
     return [
@@ -203,5 +237,6 @@ def get_menu_handlers() -> list[CallbackQueryHandler]:
         CallbackQueryHandler(menu_tasks_callback, pattern="^menu:tasks$"),
         CallbackQueryHandler(menu_upcoming_callback, pattern="^menu:upcoming$"),
         CallbackQueryHandler(menu_settings_callback, pattern="^menu:settings$"),
-        CallbackQueryHandler(timezone_change_callback, pattern="^settings:timezone:(.+)$")
+        CallbackQueryHandler(timezone_change_callback, pattern="^settings:timezone:(.+)$"),
+        CallbackQueryHandler(menu_exit_callback, pattern="^menu:exit$")
     ]

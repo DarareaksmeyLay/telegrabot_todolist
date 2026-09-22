@@ -92,7 +92,7 @@ def main() -> None:
 
     # 5. Initialize background reminder scheduler
     if application.job_queue:
-        from services.scheduler_service import poll_and_dispatch_reminders
+        from services.scheduler_service import poll_and_dispatch_reminders, check_pending_reminders
         # Polling runs every 30 seconds, with an initial 10-second delay for smooth bootup
         application.job_queue.run_repeating(
             poll_and_dispatch_reminders,
@@ -100,7 +100,14 @@ def main() -> None:
             first=10,
             name="poll_and_dispatch_reminders"
         )
-        logger.info("Background reminder scheduler registered.")
+        # Check for overdue tasks runs every 60 seconds (every minute), with an initial 15-second delay
+        application.job_queue.run_repeating(
+            check_pending_reminders,
+            interval=60,
+            first=15,
+            name="check_pending_reminders"
+        )
+        logger.info("Background reminder and overdue task schedulers registered.")
     else:
         logger.warning("JobQueue is unavailable. Reminder scheduler will not run.")
 

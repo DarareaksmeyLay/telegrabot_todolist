@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     category TEXT NOT NULL CHECK (category IN ('personal', 'work', 'school')),
     priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high')),
     due_at TIMESTAMPTZ,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'overdue')),
     repeat_rule TEXT NOT NULL DEFAULT 'none' CHECK (repeat_rule IN ('none', 'daily', 'weekdays', 'weekly', 'monthly')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),

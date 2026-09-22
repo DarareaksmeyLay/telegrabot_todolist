@@ -75,7 +75,7 @@ def get_pending_tasks(
             return []
         user_uuid = user_res.data[0]["id"]
 
-        query = client.table("tasks").select("*").eq("user_id", user_uuid).eq("status", "pending")
+        query = client.table("tasks").select("*").eq("user_id", user_uuid).in_("status", ["pending", "overdue"])
         
         if category and category.lower() != "all":
             query = query.eq("category", category.lower())
@@ -125,7 +125,7 @@ def get_completed_tasks(telegram_user_id: int) -> List[Dict[str, Any]]:
 def get_overdue_tasks(telegram_user_id: int) -> List[Dict[str, Any]]:
     """Retrieve overdue tasks of an authorized user.
 
-    A task is overdue if status is pending AND due_at is older than current UTC timestamp.
+    A task is overdue if status is 'overdue' OR status is pending AND due_at is older than current UTC timestamp.
     """
     client = get_supabase_client()
     try:
@@ -140,7 +140,7 @@ def get_overdue_tasks(telegram_user_id: int) -> List[Dict[str, Any]]:
             client.table("tasks")
             .select("*")
             .eq("user_id", user_uuid)
-            .eq("status", "pending")
+            .in_("status", ["pending", "overdue"])
             .lt("due_at", now_utc)
             .order("due_at", desc=False)
             .execute()
@@ -172,6 +172,9 @@ def count_dashboard_stats(telegram_user_id: int) -> Dict[str, int]:
 
             if status == "completed":
                 stats["completed"] += 1
+            elif status == "overdue":
+                stats["pending"] += 1
+                stats["overdue"] += 1
             elif status == "pending":
                 stats["pending"] += 1
                 if due_at_str:
