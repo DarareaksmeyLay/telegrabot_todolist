@@ -68,25 +68,32 @@ async def track_incoming_user_messages(update: Update, context: ContextTypes.DEF
                 context.user_data["menu_messages"].append(msg_id)
 
 
-def patch_bot_send_message(application: Application) -> None:
-    """Monkey-patch application.bot.send_message to automatically log all bot-sent messages."""
-    original_send_message = application.bot.send_message
+_application: Application | None = None
 
-    async def tracked_send_message(chat_id, *args, **kwargs):
-        msg = await original_send_message(chat_id, *args, **kwargs)
+
+def patch_bot_send_message(application: Application) -> None:
+    """Class-level monkey-patch of telegram.Bot.send_message to automatically log all bot-sent messages."""
+    global _application
+    _application = application
+
+    import telegram
+    original_send_message = telegram.Bot.send_message
+
+    async def tracked_send_message(self, chat_id, *args, **kwargs):
+        msg = await original_send_message(self, chat_id, *args, **kwargs)
         try:
-            if isinstance(chat_id, int):
-                user_data = application.user_data.get(chat_id)
+            if _application is not None and isinstance(chat_id, int):
+                user_data = _application.user_data.get(chat_id)
                 if user_data is not None:
                     if "menu_messages" not in user_data:
                         user_data["menu_messages"] = []
                     if msg.message_id not in user_data["menu_messages"]:
                         user_data["menu_messages"].append(msg.message_id)
         except Exception as exc:
-            logger.warning("Failed to track bot-sent message ID: %s", exc)
+            logger.warning("Failed to track bot-sent message ID in class-patch: %s", exc)
         return msg
 
-    application.bot.send_message = tracked_send_message
+    telegram.Bot.send_message = tracked_send_message
 
 
 def main() -> None:
