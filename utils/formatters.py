@@ -120,6 +120,23 @@ def format_task_detail_card(task: Dict[str, Any], user_tz: str) -> str:
             comp_date = format_relative_date(completed_at_raw, user_tz)
             comp_time = format_time(completed_at_raw, user_tz)
             status_display += f" (on {comp_date} at {comp_time})"
+    elif status_raw == "pending" and due_at_raw:
+        try:
+            from datetime import timezone
+            from zoneinfo import ZoneInfo
+            clean_str = due_at_raw.replace("Z", "+00:00")
+            due_dt = datetime.fromisoformat(clean_str)
+            if due_dt.tzinfo is None:
+                due_dt = due_dt.replace(tzinfo=ZoneInfo("UTC"))
+            
+            if due_dt < datetime.now(timezone.utc):
+                status_display = "🔴 Overdue"
+            else:
+                status_display = "⏳ Pending"
+        except Exception:
+            status_display = "⏳ Pending"
+    else:
+        status_display = "⏳ Pending"
 
     card = (
         "📋 <b>Task Details</b>\n\n"

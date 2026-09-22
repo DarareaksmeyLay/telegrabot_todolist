@@ -795,7 +795,8 @@ def get_create_task_handler() -> ConversationHandler:
         fallbacks=[
             CallbackQueryHandler(handle_back_navigation, pattern="^add:back$"),
             CallbackQueryHandler(handle_cancellation, pattern="^add:cancel$"),
-            CommandHandler("cancel", handle_cancellation)
+            CommandHandler("cancel", handle_cancellation),
+            CommandHandler("start", handle_cancellation)
         ],
         per_message=False
     )

@@ -32,14 +32,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Fetch real counts from Supabase
     stats = count_dashboard_stats(user.id)
 
-    # Localized date string
+    # Localized date and time string
     local_now = utc_to_local(datetime.utcnow(), user_tz)
     date_display = local_now.strftime("%d %B %Y") if local_now else datetime.utcnow().strftime("%d %B %Y")
+    time_display = local_now.strftime("%I:%M %p") if local_now else datetime.utcnow().strftime("%I:%M %p")
 
     welcome_message = (
         f"👋 Welcome, <b>{user.first_name}</b>!\n\n"
         "📝 <b>Personal To-Do Assistant</b>\n\n"
-        f"📅 Today: <code>{date_display}</code>\n\n"
+        f"📅 Today: <code>{date_display}</code>\n"
+        f"🕒 Refreshed: <code>{time_display}</code>\n\n"
         f"⏳ Pending: <code>{stats['pending']}</code>\n"
         f"🔴 Overdue: <code>{stats['overdue']}</code>\n"
         f"✅ Completed: <code>{stats['completed']}</code>"

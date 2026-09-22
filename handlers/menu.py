@@ -28,14 +28,16 @@ async def menu_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Fetch fresh dashboard counts
     stats = count_dashboard_stats(user.id)
 
-    # Localized date string
+    # Localized date and time string
     local_now = utc_to_local(datetime.utcnow(), user_tz)
     date_display = local_now.strftime("%d %B %Y") if local_now else datetime.utcnow().strftime("%d %B %Y")
+    time_display = local_now.strftime("%I:%M %p") if local_now else datetime.utcnow().strftime("%I:%M %p")
 
     welcome_message = (
         f"👋 Welcome, <b>{user.first_name}</b>!\n\n"
         "📝 <b>Personal To-Do Assistant</b>\n\n"
-        f"📅 Today: <code>{date_display}</code>\n\n"
+        f"📅 Today: <code>{date_display}</code>\n"
+        f"🕒 Refreshed: <code>{time_display}</code>\n\n"
         f"⏳ Pending: <code>{stats['pending']}</code>\n"
         f"🔴 Overdue: <code>{stats['overdue']}</code>\n"
         f"✅ Completed: <code>{stats['completed']}</code>"
@@ -125,10 +127,81 @@ async def menu_upcoming_callback(update: Update, context: ContextTypes.DEFAULT_T
         logger.error("Failed to render upcoming list: %s", exc)
 
 
+@authorized_only
+async def menu_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display settings screen with IANA timezone choices."""
+    query = update.callback_query
+    await query.answer()
+
+    user = update.effective_user
+    db_user = get_or_create_user(user)
+    current_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    from keyboards import get_settings_keyboard
+
+    text = (
+        "⚙️ <b>Settings Dashboard</b>\n"
+        "─────────────────\n\n"
+        f"🌐 <b>Current Timezone:</b> <code>{current_tz}</code>\n\n"
+        "To ensure reminder notifications and alert messages are delivered exactly on time, "
+        "please select your local timezone from the options below:"
+    )
+
+    try:
+        await query.edit_message_text(
+            text=text,
+            reply_markup=get_settings_keyboard(current_tz),
+            parse_mode="HTML"
+        )
+    except Exception as exc:
+        logger.error("Failed to render settings menu: %s", exc)
+
+
+@authorized_only
+async def timezone_change_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle timezone button clicks, update database, and show success."""
+    query = update.callback_query
+    
+    # Extract timezone name from pattern, e.g. "settings:timezone:Asia/Phnom_Penh"
+    new_tz = query.data.split(":")[2]
+    
+    user = update.effective_user
+    from services import update_user_timezone
+    
+    success = update_user_timezone(user.id, new_tz)
+    
+    if success:
+        await query.answer(f"Timezone updated to {new_tz}!", show_alert=False)
+    else:
+        await query.answer("Failed to update timezone. Please try again.", show_alert=True)
+
+    # Re-render settings screen with the newly saved timezone
+    from keyboards import get_settings_keyboard
+    
+    text = (
+        "⚙️ <b>Settings Dashboard</b>\n"
+        "─────────────────\n\n"
+        f"🌐 <b>Current Timezone:</b> <code>{new_tz}</code>\n\n"
+        "✨ <b>Success:</b> Timezone has been updated successfully!\n\n"
+        "Your upcoming alerts and reminders will now perfectly align with your local clock."
+    )
+
+    try:
+        await query.edit_message_text(
+            text=text,
+            reply_markup=get_settings_keyboard(new_tz),
+            parse_mode="HTML"
+        )
+    except Exception as exc:
+        logger.error("Failed to edit settings menu after update: %s", exc)
+
+
 def get_menu_handlers() -> list[CallbackQueryHandler]:
     """Return list of callback handlers for main menu routes."""
     return [
         CallbackQueryHandler(menu_main_callback, pattern="^menu:main$"),
         CallbackQueryHandler(menu_tasks_callback, pattern="^menu:tasks$"),
-        CallbackQueryHandler(menu_upcoming_callback, pattern="^menu:upcoming$")
+        CallbackQueryHandler(menu_upcoming_callback, pattern="^menu:upcoming$"),
+        CallbackQueryHandler(menu_settings_callback, pattern="^menu:settings$"),
+        CallbackQueryHandler(timezone_change_callback, pattern="^settings:timezone:(.+)$")
     ]

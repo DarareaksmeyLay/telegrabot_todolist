@@ -894,7 +894,8 @@ def get_edit_task_handlers() -> list:
         },
         fallbacks=[
             CallbackQueryHandler(handle_edit_cancellation, pattern="^task:view:[0-9a-fA-F\\-]+$"),
-            CommandHandler("cancel", handle_edit_cancellation)
+            CommandHandler("cancel", handle_edit_cancellation),
+            CommandHandler("start", handle_edit_cancellation)
         ],
         per_message=False
     )
