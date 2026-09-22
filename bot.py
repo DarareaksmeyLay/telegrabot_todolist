@@ -93,10 +93,10 @@ def main() -> None:
     # 5. Initialize background reminder scheduler
     if application.job_queue:
         from services.scheduler_service import poll_and_dispatch_reminders
-        # Polling runs every 60 seconds, with an initial 10-second delay for smooth bootup
+        # Polling runs every 30 seconds, with an initial 10-second delay for smooth bootup
         application.job_queue.run_repeating(
             poll_and_dispatch_reminders,
-            interval=60,
+            interval=30,
             first=10,
             name="poll_and_dispatch_reminders"
         )

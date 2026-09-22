@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from database import get_supabase_client
 from utils.security import verify_task_ownership
@@ -264,3 +264,29 @@ def update_task(
     except Exception as exc:
         logger.error("Error updating task %s: %s", task_id, exc)
         return None
+
+
+def get_upcoming_tasks(telegram_user_id: int) -> List[Dict[str, Any]]:
+    """Retrieve all pending tasks with a valid due_at scheduled in the future, sorted chronologically."""
+    client = get_supabase_client()
+    try:
+        user_res = client.table("users").select("id").eq("telegram_user_id", telegram_user_id).limit(1).execute()
+        if not user_res.data:
+            return []
+        user_uuid = user_res.data[0]["id"]
+
+        now_utc = datetime.utcnow().isoformat()
+
+        res = (
+            client.table("tasks")
+            .select("*")
+            .eq("user_id", user_uuid)
+            .eq("status", "pending")
+            .gt("due_at", now_utc)
+            .order("due_at", desc=False)
+            .execute()
+        )
+        return res.data or []
+    except Exception as exc:
+        logger.error("Error fetching upcoming tasks for %s: %s", telegram_user_id, exc)
+        return []

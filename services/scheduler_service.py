@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
@@ -50,8 +50,9 @@ def format_reminder_message(task: dict, user_timezone: str) -> str:
 
 async def poll_and_dispatch_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check Supabase for pending reminders, deliver direct alerts, and flag them as sent."""
+    logger.info("Executing background reminder polling check...")
     client = get_supabase_client()
-    now_utc = datetime.utcnow().isoformat()
+    now_utc = datetime.now(timezone.utc).isoformat()
 
     try:
         # Fetch pending reminders scheduled for now or in the past

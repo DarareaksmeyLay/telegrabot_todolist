@@ -9,7 +9,8 @@ from .task_service import (
     count_dashboard_stats,
     complete_task_by_id,
     delete_task_by_id,
-    update_task
+    update_task,
+    get_upcoming_tasks
 )
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "count_dashboard_stats",
     "complete_task_by_id",
     "delete_task_by_id",
-    "update_task"
+    "update_task",
+    "get_upcoming_tasks"
 ]
