@@ -896,7 +896,7 @@ def get_edit_task_handlers() -> list:
             CallbackQueryHandler(handle_edit_cancellation, pattern="^task:view:[0-9a-fA-F\\-]+$"),
             CommandHandler("cancel", handle_edit_cancellation)
         ],
-        per_message=True
+        per_message=False
     )
 
     # 2. General CallbackQueryHandlers for direct inline updates

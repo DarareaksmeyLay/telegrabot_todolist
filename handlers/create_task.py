@@ -136,7 +136,8 @@ async def start_task_creation(update: Update, context: ContextTypes.DEFAULT_TYPE
         "due_date": None,
         "due_time": None,
         "priority": "medium",
-        "reminder_offset_minutes": None
+        "reminder_offset_minutes": None,
+        "menu_message_id": query.message.message_id if query and query.message else None
     }
     context.user_data["history"] = []
 
@@ -166,20 +167,41 @@ async def start_task_creation(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_task_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Store task title and transition to Category selection (or Date if preselected)."""
     text = update.message.text.strip()
+    
+    # Clean up the user's input message to keep chat tidy
+    try:
+        await update.message.delete()
+    except Exception as exc:
+        logger.debug("Failed to delete user message: %s", exc)
+
     if not text:
-        await update.message.reply_text("⚠️ Task name cannot be empty. Please enter a valid name:")
         return WAITING_TASK_NAME
 
     context.user_data["task_draft"]["title"] = text
     draft = context.user_data["task_draft"]
+    menu_msg_id = draft.get("menu_message_id")
+
+    async def edit_or_reply(text, reply_markup=None, parse_mode=None):
+        if menu_msg_id:
+            try:
+                return await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=menu_msg_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+            except Exception as exc:
+                logger.debug("Failed to edit menu message: %s", exc)
+        return await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+
+    push_history(context, WAITING_TASK_NAME)
 
     # If category is preselected, skip the Category Selection state and head to Due Date directly
     if draft["category"]:
-        push_history(context, WAITING_TASK_NAME)
-        return await show_date_selection_menu(update.message.reply_text, context)
+        return await show_date_selection_menu(edit_or_reply, context)
 
-    push_history(context, WAITING_TASK_NAME)
-    return await show_category_selection_menu(update.message.reply_text, context)
+    return await show_category_selection_menu(edit_or_reply, context)
 
 
 # ====================================================================
@@ -294,13 +316,37 @@ async def handle_date_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_custom_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Parse and validate DD/MM/YYYY input string from user."""
     text = update.message.text.strip()
+    
+    # Delete user's text input to keep chat tidy
+    try:
+        await update.message.delete()
+    except Exception as exc:
+        logger.debug("Failed to delete user message: %s", exc)
+
+    draft = context.user_data["task_draft"]
+    menu_msg_id = draft.get("menu_message_id")
+
+    async def edit_or_reply(text, reply_markup=None, parse_mode=None):
+        if menu_msg_id:
+            try:
+                return await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=menu_msg_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+            except Exception as exc:
+                logger.debug("Failed to edit menu message: %s", exc)
+        return await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+
     parsed_date = parse_date_string(text)
 
     if not parsed_date:
         markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
-        await update.message.reply_text(
-            "⚠️ <b>Invalid Date format</b>\n\n"
-            "Please ensure the date format is exactly <b>DD/MM/YYYY</b>, and is a valid future date (e.g., 25/09/2026):",
+        await edit_or_reply(
+            text="⚠️ <b>Invalid Date format</b>\n\n"
+                 "Please ensure the date format is exactly <b>DD/MM/YYYY</b>, and is a valid future date (e.g., 25/09/2026):",
             reply_markup=markup,
             parse_mode="HTML"
         )
@@ -315,8 +361,8 @@ async def handle_custom_date_text(update: Update, context: ContextTypes.DEFAULT_
 
     if parsed_date < today_local:
         markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
-        await update.message.reply_text(
-            "⚠️ <b>Past Date</b>\n\nDue date cannot be in the past. Please enter a valid future date:",
+        await edit_or_reply(
+            text="⚠️ <b>Past Date</b>\n\nDue date cannot be in the past. Please enter a valid future date:",
             reply_markup=markup,
             parse_mode="HTML"
         )
@@ -324,7 +370,7 @@ async def handle_custom_date_text(update: Update, context: ContextTypes.DEFAULT_
 
     context.user_data["task_draft"]["due_date"] = parsed_date
     push_history(context, WAITING_CUSTOM_DATE)
-    return await show_time_selection_menu(update.message.reply_text, context)
+    return await show_time_selection_menu(edit_or_reply, context)
 
 
 # ====================================================================
@@ -391,13 +437,37 @@ async def handle_time_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_custom_time_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Parse custom time text input."""
     text = update.message.text.strip()
+    
+    # Delete user's text input to keep chat tidy
+    try:
+        await update.message.delete()
+    except Exception as exc:
+        logger.debug("Failed to delete user message: %s", exc)
+
+    draft = context.user_data["task_draft"]
+    menu_msg_id = draft.get("menu_message_id")
+
+    async def edit_or_reply(text, reply_markup=None, parse_mode=None):
+        if menu_msg_id:
+            try:
+                return await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=menu_msg_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+            except Exception as exc:
+                logger.debug("Failed to edit menu message: %s", exc)
+        return await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+
     parsed_time = parse_time_string(text)
 
     if not parsed_time:
         markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
-        await update.message.reply_text(
-            "⚠️ <b>Invalid Time format</b>\n\n"
-            "Please ensure the format is valid (e.g. <code>14:30</code>, <code>2:30 PM</code>, or <code>9:00 AM</code>):",
+        await edit_or_reply(
+            text="⚠️ <b>Invalid Time format</b>\n\n"
+                 "Please ensure the format is valid (e.g. <code>14:30</code>, <code>2:30 PM</code>, or <code>9:00 AM</code>):",
             reply_markup=markup,
             parse_mode="HTML"
         )
@@ -405,7 +475,7 @@ async def handle_custom_time_text(update: Update, context: ContextTypes.DEFAULT_
 
     context.user_data["task_draft"]["due_time"] = parsed_time
     push_history(context, WAITING_CUSTOM_TIME)
-    return await show_priority_selection_menu(update.message.reply_text, context)
+    return await show_priority_selection_menu(edit_or_reply, context)
 
 
 # ====================================================================
@@ -727,5 +797,5 @@ def get_create_task_handler() -> ConversationHandler:
             CallbackQueryHandler(handle_cancellation, pattern="^add:cancel$"),
             CommandHandler("cancel", handle_cancellation)
         ],
-        per_message=True
+        per_message=False
     )
