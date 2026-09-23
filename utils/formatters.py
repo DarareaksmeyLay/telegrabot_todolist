@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, date
 from typing import Dict, Any, Optional
-from utils.dates import utc_to_local, get_timezone
+from utils.dates import utc_to_local, get_timezone, format_reminder_label
 
 # Emojis and display titles
 CATEGORY_EMOJIS: Dict[str, str] = {
@@ -94,7 +94,11 @@ def format_time(target_dt: Optional[datetime], tz_name: str) -> str:
     return local_dt.strftime("%I:%M %p").lstrip("0")
 
 
-def format_task_detail_card(task: Dict[str, Any], user_tz: str) -> str:
+def format_task_detail_card(
+    task: Dict[str, Any],
+    user_tz: str,
+    reminders: Optional[list] = None
+) -> str:
     """Generate a clean, highly formatted markdown block of a task's full details."""
     title = task.get("title", "Untitled")
     description = task.get("description") or "No description provided."
@@ -138,6 +142,37 @@ def format_task_detail_card(task: Dict[str, Any], user_tz: str) -> str:
     else:
         status_display = "⏳ Pending"
 
+    # Format alerts if provided or attached
+    alerts_text = ""
+    rems = reminders if reminders is not None else task.get("reminders")
+    if rems:
+        # Sort pending reminders
+        pending_rems = [r for r in rems if r.get("status") == "pending"]
+        if pending_rems:
+            pending_rems.sort(key=lambda x: str(x.get("remind_at", "")))
+            lines = []
+            if len(pending_rems) >= 2:
+                r1 = pending_rems[0]
+                r2 = pending_rems[1]
+                lines.append(f"• 1st Alert (Advance): {format_reminder_label(r1.get('remind_at'), due_at_raw, user_tz)}")
+                r2_date = format_relative_date(r2.get("remind_at"), user_tz)
+                r2_time = format_time(r2.get("remind_at"), user_tz)
+                lines.append(f"• 2nd Alert (Due Date): {r2_date} at {r2_time}")
+            elif len(pending_rems) == 1:
+                r = pending_rems[0]
+                local_r = utc_to_local(r.get("remind_at"), user_tz)
+                local_due = utc_to_local(due_at_raw, user_tz) if due_at_raw else None
+                if local_r and local_due and local_r.date() == local_due.date():
+                    r_time = format_time(r.get("remind_at"), user_tz)
+                    lines.append(f"• 2nd Alert (Due Date): At {r_time}")
+                else:
+                    lines.append(f"• 1st Alert (Advance): {format_reminder_label(r.get('remind_at'), due_at_raw, user_tz)}")
+            if lines:
+                alerts_text = f"\n🔔 <b>Alerts:</b>\n" + "\n".join(lines)
+    elif due_at_raw:
+        alerts_text = "\n🔔 <b>Alerts:</b> 🔕 None set"
+
+
     card = (
         "📋 <b>Task Details</b>\n\n"
         f"📝 <b>{title}</b>\n"
@@ -146,6 +181,8 @@ def format_task_detail_card(task: Dict[str, Any], user_tz: str) -> str:
         f"📅 <b>Due:</b> {due_display}\n"
         f"🚩 <b>Priority:</b> {priority}\n"
         f"🔁 <b>Repeat:</b> {repeat_rule}\n"
-        f"📌 <b>Status:</b> {status_display}\n"
+        f"📌 <b>Status:</b> {status_display}"
+        f"{alerts_text}\n"
     )
     return card
+

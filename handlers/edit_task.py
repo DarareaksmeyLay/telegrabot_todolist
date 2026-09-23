@@ -32,11 +32,16 @@ from utils.dates import (
     parse_date_string,
     parse_time_string,
     local_to_utc,
-    get_timezone
+    utc_to_local,
+    get_timezone,
+    parse_advance_alert_input,
+    format_reminder_label
 )
 from utils.formatters import (
     get_category_display,
     get_priority_display,
+    format_relative_date,
+    format_time,
     format_task_detail_card
 )
 
@@ -46,8 +51,11 @@ logger = logging.getLogger(__name__)
 (
     WAITING_EDIT_TITLE_TEXT,
     WAITING_EDIT_DATE_TEXT,
-    WAITING_EDIT_TIME_TEXT
-) = range(3)
+    WAITING_EDIT_TIME_TEXT,
+    WAITING_EDIT_REMIND1_TEXT,
+    WAITING_EDIT_REMIND2_TEXT
+) = range(5)
+
 
 
 # ====================================================================
@@ -539,8 +547,122 @@ async def handle_save_preset_time_callback(update: Update, context: ContextTypes
     await render_edit_menu(update, context, task_id)
 
 
+def _get_task_reminders(task_id: str, user_tz: str, due_at_utc: Optional[datetime] = None):
+    """Retrieve and categorize pending reminders for a task into 1st Alert and 2nd Alert."""
+    client = get_supabase_client()
+    try:
+        rem_res = client.table("reminders").select("*").eq("task_id", task_id).eq("status", "pending").order("remind_at", desc=False).execute()
+        rems = rem_res.data or []
+    except Exception as exc:
+        logger.error("Error fetching reminders: %s", exc)
+        rems = []
+
+    rem1 = None
+    rem2 = None
+
+    if len(rems) >= 2:
+        rem1 = rems[0]
+        rem2 = rems[1]
+    elif len(rems) == 1:
+        r = rems[0]
+        if due_at_utc:
+            local_r = utc_to_local(r.get("remind_at"), user_tz)
+            local_due = utc_to_local(due_at_utc, user_tz)
+            if local_r and local_due and local_r.date() == local_due.date():
+                rem2 = r
+            else:
+                rem1 = r
+        else:
+            rem1 = r
+
+    return rems, rem1, rem2
+
+
 async def handle_edit_reminder_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Render Reminder options. Supports both edit:field:reminder and direct task:remind."""
+    """Render the main dual-reminder management hub for the task."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+        task_id = query.data.split(":")[-1]
+    else:
+        task_id = context.user_data.get("edit_task_id")
+
+    user = update.effective_user
+    task = get_task_by_id(task_id, user.id)
+    if not task:
+        if query:
+            await query.edit_message_text("⚠️ Task not found.", parse_mode="HTML")
+        return
+
+    if not task.get("due_at"):
+        btn = InlineKeyboardButton("📅 Set Due Date", callback_data=f"edit:field:date:{task_id}")
+        msg = "⚠️ <b>Due Date Required</b>\n\nYou must set a Due Date before scheduling reminders."
+        if query:
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[btn]]), parse_mode="HTML")
+        return
+
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    due_at_str = task.get("due_at").replace("Z", "+00:00")
+    due_at_utc = datetime.fromisoformat(due_at_str)
+    due_display = f"{format_relative_date(due_at_str, user_tz)} • {format_time(due_at_str, user_tz)}"
+
+    rems, rem1, rem2 = _get_task_reminders(task_id, user_tz, due_at_utc)
+
+    # Format 1st alert display
+    if rem1:
+        rem1_dt = datetime.fromisoformat(rem1.get("remind_at").replace("Z", "+00:00"))
+        rem1_str = format_reminder_label(rem1_dt, due_at_utc, user_tz)
+    else:
+        rem1_str = "🔕 Not set"
+
+    # Format 2nd alert display
+    if rem2:
+        rem2_dt = datetime.fromisoformat(rem2.get("remind_at").replace("Z", "+00:00"))
+        rem2_local = utc_to_local(rem2_dt, user_tz)
+        rem2_time = rem2_local.strftime("%I:%M %p").lstrip("0") if rem2_local else ""
+        rem2_str = f"Due Date at {rem2_time}"
+    else:
+        rem2_str = "🔕 Not set"
+
+    title = task.get("title") or "Untitled"
+    text = (
+        "🔔 <b>Manage Task Alerts</b>\n"
+        "────────────────────\n"
+        f"📝 <b>{html.escape(title)}</b>\n"
+        f"📅 <b>Due:</b> {due_display}\n\n"
+        "<b>Active Alerts:</b>\n"
+        f"• 1st Alert (Advance): <b>{rem1_str}</b>\n"
+        f"• 2nd Alert (Due Date): <b>{rem2_str}</b>\n\n"
+        "Select an alert option below to configure or update:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔔 Configure 1st Alert (Advance)", callback_data=f"edit:menu:rem1:{task_id}")
+        ],
+        [
+            InlineKeyboardButton("🔔 Configure 2nd Alert (Due Date)", callback_data=f"edit:menu:rem2:{task_id}")
+        ],
+        [
+            InlineKeyboardButton("🔕 Clear All Alerts", callback_data=f"edit:save_remind:clear:{task_id}")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Edit Menu", callback_data=f"task:edit:{task_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"task:view:{task_id}")
+        ]
+    ]
+
+    markup = InlineKeyboardMarkup(keyboard)
+    if query:
+        await query.edit_message_text(text=text, reply_markup=markup, parse_mode="HTML")
+    elif update.effective_message:
+        await update.effective_message.reply_text(text=text, reply_markup=markup, parse_mode="HTML")
+
+
+async def handle_edit_rem1_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Render 1st Alert (Advance Reminder) options: 1-4 days, 1 week, custom, or none."""
     query = update.callback_query
     await query.answer()
 
@@ -552,44 +674,122 @@ async def handle_edit_reminder_menu(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text("⚠️ Task not found.", parse_mode="HTML")
         return
 
-    if not task.get("due_at"):
-        await query.edit_message_text(
-            "⚠️ <b>Due Date Required</b>\n\nYou must set a Due Date before scheduling reminders.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📅 Set Due Date", callback_data=f"edit:field:date:{task_id}")]]) ,
-            parse_mode="HTML"
-        )
-        return
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    due_at_str = task.get("due_at").replace("Z", "+00:00")
+    due_at_utc = datetime.fromisoformat(due_at_str)
+    due_display = f"{format_relative_date(due_at_str, user_tz)} • {format_time(due_at_str, user_tz)}"
+
+    rems, rem1, rem2 = _get_task_reminders(task_id, user_tz, due_at_utc)
+    if rem1:
+        rem1_dt = datetime.fromisoformat(rem1.get("remind_at").replace("Z", "+00:00"))
+        current_status = format_reminder_label(rem1_dt, due_at_utc, user_tz)
+    else:
+        current_status = "🔕 Not set"
 
     title = task.get("title") or "Untitled"
-    text = f"🔔 <b>Configure Reminder</b> for:\n\"{html.escape(title)}\""
+    text = (
+        "🔔 <b>Configure 1st Alert (Advance Reminder)</b>\n"
+        "────────────────────\n"
+        f"📝 Task: <b>{html.escape(title)}</b>\n"
+        f"📅 Due: <b>{due_display}</b>\n"
+        f"Current: <b>{current_status}</b>\n\n"
+        "Choose an advance alert time before your task is due:"
+    )
+
     keyboard = [
         [
-            InlineKeyboardButton("At due time", callback_data=f"edit:save_remind:0:{task_id}"),
-            InlineKeyboardButton("10 minutes before", callback_data=f"edit:save_remind:10:{task_id}")
+            InlineKeyboardButton("1 day before", callback_data=f"edit:save_rem1:1440:{task_id}"),
+            InlineKeyboardButton("2 days before", callback_data=f"edit:save_rem1:2880:{task_id}")
         ],
         [
-            InlineKeyboardButton("30 minutes before", callback_data=f"edit:save_remind:30:{task_id}"),
-            InlineKeyboardButton("1 hour before", callback_data=f"edit:save_remind:60:{task_id}")
+            InlineKeyboardButton("3 days before", callback_data=f"edit:save_rem1:4320:{task_id}"),
+            InlineKeyboardButton("4 days before", callback_data=f"edit:save_rem1:5760:{task_id}")
         ],
         [
-            InlineKeyboardButton("1 day before", callback_data=f"edit:save_remind:1440:{task_id}"),
-            InlineKeyboardButton("🔕 No Reminder", callback_data=f"edit:save_remind:none:{task_id}")
+            InlineKeyboardButton("1 week before", callback_data=f"edit:save_rem1:10080:{task_id}"),
+            InlineKeyboardButton("1 hour before", callback_data=f"edit:save_rem1:60:{task_id}")
         ],
         [
-            InlineKeyboardButton("🔙 Back to Edit Menu", callback_data=f"task:edit:{task_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data=f"task:view:{task_id}")
+            InlineKeyboardButton("⌨️ Custom Advance Alert", callback_data=f"edit:save_rem1:custom:{task_id}"),
+            InlineKeyboardButton("🔕 Turn Off 1st Alert", callback_data=f"edit:save_rem1:none:{task_id}")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Alerts", callback_data=f"edit:field:reminder:{task_id}")
         ]
     ]
+
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
-async def handle_save_reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Commit or update reminder entries in database."""
+async def handle_edit_rem2_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Render 2nd Alert (Due Date Reminder) options: Morning, Afternoon, Evening, Due Time, Custom, or none."""
+    query = update.callback_query
+    await query.answer()
+
+    task_id = query.data.split(":")[-1]
+    user = update.effective_user
+
+    task = get_task_by_id(task_id, user.id)
+    if not task:
+        await query.edit_message_text("⚠️ Task not found.", parse_mode="HTML")
+        return
+
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    due_at_str = task.get("due_at").replace("Z", "+00:00")
+    due_at_utc = datetime.fromisoformat(due_at_str)
+    due_display = f"{format_relative_date(due_at_str, user_tz)} • {format_time(due_at_str, user_tz)}"
+
+    rems, rem1, rem2 = _get_task_reminders(task_id, user_tz, due_at_utc)
+    if rem2:
+        rem2_dt = datetime.fromisoformat(rem2.get("remind_at").replace("Z", "+00:00"))
+        rem2_local = utc_to_local(rem2_dt, user_tz)
+        rem2_time = rem2_local.strftime("%I:%M %p").lstrip("0") if rem2_local else ""
+        current_status = f"Due Date at {rem2_time}"
+    else:
+        current_status = "🔕 Not set"
+
+    title = task.get("title") or "Untitled"
+    text = (
+        "🔔 <b>Configure 2nd Alert (Due Date Alert)</b>\n"
+        "────────────────────\n"
+        f"📝 Task: <b>{html.escape(title)}</b>\n"
+        f"📅 Due: <b>{due_display}</b>\n"
+        f"Current: <b>{current_status}</b>\n\n"
+        "Choose an alert time on your due date:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🌅 Morning (08:00 AM)", callback_data=f"edit:save_rem2:morning:{task_id}"),
+            InlineKeyboardButton("☀️ Afternoon (01:00 PM)", callback_data=f"edit:save_rem2:afternoon:{task_id}")
+        ],
+        [
+            InlineKeyboardButton("🌙 Evening (06:00 PM)", callback_data=f"edit:save_rem2:evening:{task_id}"),
+            InlineKeyboardButton("⏰ At Due Time", callback_data=f"edit:save_rem2:duetime:{task_id}")
+        ],
+        [
+            InlineKeyboardButton("⌨️ Custom Time on Due Date", callback_data=f"edit:save_rem2:custom:{task_id}"),
+            InlineKeyboardButton("🔕 Turn Off 2nd Alert", callback_data=f"edit:save_rem2:none:{task_id}")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Alerts", callback_data=f"edit:field:reminder:{task_id}")
+        ]
+    ]
+
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def handle_save_rem1_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save or remove the 1st alert (advance reminder)."""
     query = update.callback_query
     await query.answer()
 
     parts = query.data.split(":")
-    offset_str = parts[2]
+    choice = parts[2]
     task_id = parts[-1]
     user = update.effective_user
 
@@ -597,23 +797,31 @@ async def handle_save_reminder_callback(update: Update, context: ContextTypes.DE
     if not task or not task.get("due_at"):
         return
 
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
     client = get_supabase_client()
 
-    # Cancel previous pending reminders for this task
-    try:
-        client.table("reminders").update({"status": "cancelled"}).eq("task_id", task_id).eq("status", "pending").execute()
-    except Exception as exc:
-        logger.error("Error clearing old reminders: %s", exc)
+    due_at_str = task.get("due_at").replace("Z", "+00:00")
+    due_at_utc = datetime.fromisoformat(due_at_str)
 
-    if offset_str != "none":
-        offset_minutes = int(offset_str)
-        due_at_str = task.get("due_at").replace("Z", "+00:00")
-        due_at_utc = datetime.fromisoformat(due_at_str)
+    # Cancel old 1st alert if present
+    rems, old_rem1, old_rem2 = _get_task_reminders(task_id, user_tz, due_at_utc)
+    if old_rem1:
+        try:
+            client.table("reminders").update({"status": "cancelled"}).eq("id", old_rem1["id"]).execute()
+        except Exception as exc:
+            logger.error("Error cancelling previous 1st reminder: %s", exc)
+
+    if choice != "none":
+        offset_minutes = int(choice)
         remind_at_utc = due_at_utc - timedelta(minutes=offset_minutes)
 
-        db_user = get_or_create_user(user)
-        db_user_uuid = task.get("user_id")
+        from datetime import timezone
+        if remind_at_utc <= datetime.now(timezone.utc):
+            await query.answer("⚠️ This alert time has already passed! Please select a later alert.", show_alert=True)
+            return
 
+        db_user_uuid = task.get("user_id")
         try:
             client.table("reminders").insert({
                 "task_id": task_id,
@@ -621,11 +829,98 @@ async def handle_save_reminder_callback(update: Update, context: ContextTypes.DE
                 "remind_at": remind_at_utc.isoformat(),
                 "status": "pending"
             }).execute()
-            logger.info("Saved reminder for task %s to trigger at %s", task_id, remind_at_utc)
+            logger.info("Saved 1st alert for task %s at %s", task_id, remind_at_utc)
         except Exception as exc:
-            logger.error("Error inserting reminder on edit: %s", exc)
+            logger.error("Error inserting 1st reminder: %s", exc)
 
-    await render_edit_menu(update, context, task_id)
+    await handle_edit_reminder_menu(update, context)
+
+
+async def handle_save_rem2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save or remove the 2nd alert (due date reminder)."""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split(":")
+    choice = parts[2]
+    task_id = parts[-1]
+    user = update.effective_user
+
+    task = get_task_by_id(task_id, user.id)
+    if not task or not task.get("due_at"):
+        return
+
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+    client = get_supabase_client()
+
+    due_at_str = task.get("due_at").replace("Z", "+00:00")
+    due_at_utc = datetime.fromisoformat(due_at_str)
+    local_due = utc_to_local(due_at_utc, user_tz)
+
+    # Cancel old 2nd alert if present
+    rems, old_rem1, old_rem2 = _get_task_reminders(task_id, user_tz, due_at_utc)
+    if old_rem2:
+        try:
+            client.table("reminders").update({"status": "cancelled"}).eq("id", old_rem2["id"]).execute()
+        except Exception as exc:
+            logger.error("Error cancelling previous 2nd reminder: %s", exc)
+
+    if choice != "none":
+        if choice == "morning":
+            target_time = time(8, 0)
+        elif choice == "afternoon":
+            target_time = time(13, 0)
+        elif choice == "evening":
+            target_time = time(18, 0)
+        elif choice == "duetime":
+            target_time = local_due.time() if local_due else time(9, 0)
+        else:
+            target_time = time(9, 0)
+
+        naive_alert = datetime.combine(local_due.date(), target_time)
+        remind_at_utc = local_to_utc(naive_alert, user_tz)
+
+        from datetime import timezone
+        if remind_at_utc <= datetime.now(timezone.utc):
+            await query.answer("⚠️ This time has already passed today! Please select a later time.", show_alert=True)
+            return
+
+        db_user_uuid = task.get("user_id")
+        try:
+            client.table("reminders").insert({
+                "task_id": task_id,
+                "user_id": db_user_uuid,
+                "remind_at": remind_at_utc.isoformat(),
+                "status": "pending"
+            }).execute()
+            logger.info("Saved 2nd alert for task %s at %s", task_id, remind_at_utc)
+        except Exception as exc:
+            logger.error("Error inserting 2nd reminder: %s", exc)
+
+    await handle_edit_reminder_menu(update, context)
+
+
+async def handle_clear_reminders_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all scheduled alerts for a task."""
+    query = update.callback_query
+    await query.answer("All alerts cleared.")
+
+    task_id = query.data.split(":")[-1]
+    client = get_supabase_client()
+    try:
+        client.table("reminders").update({"status": "cancelled"}).eq("task_id", task_id).eq("status", "pending").execute()
+        logger.info("Cleared all pending alerts for task %s", task_id)
+    except Exception as exc:
+        logger.error("Error clearing alerts: %s", exc)
+
+    await handle_edit_reminder_menu(update, context)
+
+
+async def handle_save_reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Legacy compatibility callback routing to handle_save_rem1_callback."""
+    await handle_save_rem1_callback(update, context)
+
 
 
 # ====================================================================
@@ -861,6 +1156,203 @@ async def handle_edit_time_text(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
+async def start_edit_rem1_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt user for custom advance alert text during task edit."""
+    query = update.callback_query
+    await query.answer()
+
+    task_id = query.data.split(":")[-1]
+    context.user_data["edit_task_id"] = task_id
+
+    text = (
+        "⌨️ <b>Custom First Alert (Advance Reminder)</b>\n\n"
+        "Type how long before your task is due (e.g. <code>2 days</code>, <code>3d</code>, <code>5 days</code>, <code>12 hours</code>, <code>30 mins</code>)\n"
+        "or enter a specific date/time (e.g. <code>24/09/2026 09:00 AM</code>):"
+    )
+    await query.edit_message_text(text=text, reply_markup=get_edit_cancel_keyboard(task_id), parse_mode="HTML")
+    return WAITING_EDIT_REMIND1_TEXT
+
+
+async def handle_edit_rem1_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Parse custom advance alert, save to database, and update UI."""
+    text = update.message.text.strip()
+    task_id = context.user_data.get("edit_task_id")
+    user = update.effective_user
+
+    if not task_id:
+        context.user_data.pop("edit_task_id", None)
+        return ConversationHandler.END
+
+    task = get_task_by_id(task_id, user.id)
+    if not task or not task.get("due_at"):
+        context.user_data.pop("edit_task_id", None)
+        return ConversationHandler.END
+
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    due_at_str = task.get("due_at").replace("Z", "+00:00")
+    due_at_utc = datetime.fromisoformat(due_at_str)
+    local_due = utc_to_local(due_at_utc, user_tz)
+
+    parsed_local_dt = parse_advance_alert_input(text, local_due)
+    if not parsed_local_dt:
+        await update.message.reply_text(
+            "⚠️ <b>Invalid Alert Format</b>\n\n"
+            "Please enter a valid format (e.g. <code>2 days</code>, <code>3d</code>, <code>12 hours</code>, or <code>24/09/2026 09:00 AM</code>):",
+            reply_markup=get_edit_cancel_keyboard(task_id),
+            parse_mode="HTML"
+        )
+        return WAITING_EDIT_REMIND1_TEXT
+
+    remind_at_utc = local_to_utc(parsed_local_dt, user_tz)
+    from datetime import timezone
+    now_utc = datetime.now(timezone.utc)
+
+    if remind_at_utc >= due_at_utc:
+        await update.message.reply_text(
+            "⚠️ <b>Alert Must Be Before Due Time</b>\n\n"
+            "The 1st alert is an advance reminder and must be set before the due date/time. Please try again:",
+            reply_markup=get_edit_cancel_keyboard(task_id),
+            parse_mode="HTML"
+        )
+        return WAITING_EDIT_REMIND1_TEXT
+
+    if remind_at_utc <= now_utc:
+        await update.message.reply_text(
+            "⚠️ <b>Past Alert Time</b>\n\n"
+            "This alert time has already passed. Please enter a future time before your task is due:",
+            reply_markup=get_edit_cancel_keyboard(task_id),
+            parse_mode="HTML"
+        )
+        return WAITING_EDIT_REMIND1_TEXT
+
+    client = get_supabase_client()
+    rems, old_rem1, old_rem2 = _get_task_reminders(task_id, user_tz, due_at_utc)
+    if old_rem1:
+        try:
+            client.table("reminders").update({"status": "cancelled"}).eq("id", old_rem1["id"]).execute()
+        except Exception as exc:
+            logger.error("Error cancelling old 1st reminder: %s", exc)
+
+    db_user_uuid = task.get("user_id")
+    try:
+        client.table("reminders").insert({
+            "task_id": task_id,
+            "user_id": db_user_uuid,
+            "remind_at": remind_at_utc.isoformat(),
+            "status": "pending"
+        }).execute()
+        logger.info("Saved custom 1st alert for task %s at %s", task_id, remind_at_utc)
+    except Exception as exc:
+        logger.error("Error inserting custom 1st reminder: %s", exc)
+
+    from keyboards import get_task_details_keyboard
+    updated_task = get_task_by_id(task_id, user.id)
+    await update.message.reply_text(
+        f"✅ <b>1st Alert Updated Successfully!</b>\n\n{format_task_detail_card(updated_task, user_tz)}",
+        reply_markup=get_task_details_keyboard(task_id),
+        parse_mode="HTML"
+    )
+
+    context.user_data.pop("edit_task_id", None)
+    return ConversationHandler.END
+
+
+async def start_edit_rem2_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Prompt user for custom due date alert time during task edit."""
+    query = update.callback_query
+    await query.answer()
+
+    task_id = query.data.split(":")[-1]
+    context.user_data["edit_task_id"] = task_id
+
+    text = (
+        "⌨️ <b>Custom Second Alert (Due Date Time)</b>\n\n"
+        "Enter the alert time on your task's due date (e.g. <code>10:30 AM</code>, <code>2:45 PM</code>, or <code>15:00</code>):"
+    )
+    await query.edit_message_text(text=text, reply_markup=get_edit_cancel_keyboard(task_id), parse_mode="HTML")
+    return WAITING_EDIT_REMIND2_TEXT
+
+
+async def handle_edit_rem2_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Parse custom due date time, save to database, and update UI."""
+    text = update.message.text.strip()
+    task_id = context.user_data.get("edit_task_id")
+    user = update.effective_user
+
+    if not task_id:
+        context.user_data.pop("edit_task_id", None)
+        return ConversationHandler.END
+
+    task = get_task_by_id(task_id, user.id)
+    if not task or not task.get("due_at"):
+        context.user_data.pop("edit_task_id", None)
+        return ConversationHandler.END
+
+    parsed_time = parse_time_string(text)
+    if not parsed_time:
+        await update.message.reply_text(
+            "⚠️ <b>Invalid Time format</b>\n\n"
+            "Please enter a valid time (e.g. <code>10:30 AM</code>, <code>2:30 PM</code>, or <code>15:00</code>):",
+            reply_markup=get_edit_cancel_keyboard(task_id),
+            parse_mode="HTML"
+        )
+        return WAITING_EDIT_REMIND2_TEXT
+
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    due_at_str = task.get("due_at").replace("Z", "+00:00")
+    due_at_utc = datetime.fromisoformat(due_at_str)
+    local_due = utc_to_local(due_at_utc, user_tz)
+
+    naive_alert = datetime.combine(local_due.date(), parsed_time)
+    remind_at_utc = local_to_utc(naive_alert, user_tz)
+
+    from datetime import timezone
+    now_utc = datetime.now(timezone.utc)
+    if remind_at_utc <= now_utc:
+        await update.message.reply_text(
+            "⚠️ <b>Past Time</b>\n\n"
+            "This time has already passed today. Please enter a future time on your due date:",
+            reply_markup=get_edit_cancel_keyboard(task_id),
+            parse_mode="HTML"
+        )
+        return WAITING_EDIT_REMIND2_TEXT
+
+    client = get_supabase_client()
+    rems, old_rem1, old_rem2 = _get_task_reminders(task_id, user_tz, due_at_utc)
+    if old_rem2:
+        try:
+            client.table("reminders").update({"status": "cancelled"}).eq("id", old_rem2["id"]).execute()
+        except Exception as exc:
+            logger.error("Error cancelling old 2nd reminder: %s", exc)
+
+    db_user_uuid = task.get("user_id")
+    try:
+        client.table("reminders").insert({
+            "task_id": task_id,
+            "user_id": db_user_uuid,
+            "remind_at": remind_at_utc.isoformat(),
+            "status": "pending"
+        }).execute()
+        logger.info("Saved custom 2nd alert for task %s at %s", task_id, remind_at_utc)
+    except Exception as exc:
+        logger.error("Error inserting custom 2nd reminder: %s", exc)
+
+    from keyboards import get_task_details_keyboard
+    updated_task = get_task_by_id(task_id, user.id)
+    await update.message.reply_text(
+        f"✅ <b>2nd Alert Updated Successfully!</b>\n\n{format_task_detail_card(updated_task, user_tz)}",
+        reply_markup=get_task_details_keyboard(task_id),
+        parse_mode="HTML"
+    )
+
+    context.user_data.pop("edit_task_id", None)
+    return ConversationHandler.END
+
+
 async def handle_edit_cancellation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Safely abort current text input and load the details card."""
     if update.callback_query:
@@ -912,7 +1404,9 @@ def get_edit_task_handlers() -> list:
         entry_points=[
             CallbackQueryHandler(start_edit_title_conversation, pattern="^edit:field:title:[0-9a-fA-F\\-]+$"),
             CallbackQueryHandler(start_edit_date_conversation, pattern="^edit:save_date:custom:[0-9a-fA-F\\-]+$"),
-            CallbackQueryHandler(start_edit_time_conversation, pattern="^edit:save_time:custom:[0-9a-fA-F\\-]+$")
+            CallbackQueryHandler(start_edit_time_conversation, pattern="^edit:save_time:custom:[0-9a-fA-F\\-]+$"),
+            CallbackQueryHandler(start_edit_rem1_conversation, pattern="^edit:save_rem1:custom:[0-9a-fA-F\\-]+$"),
+            CallbackQueryHandler(start_edit_rem2_conversation, pattern="^edit:save_rem2:custom:[0-9a-fA-F\\-]+$")
         ],
         states={
             WAITING_EDIT_TITLE_TEXT: [
@@ -923,6 +1417,12 @@ def get_edit_task_handlers() -> list:
             ],
             WAITING_EDIT_TIME_TEXT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_time_text)
+            ],
+            WAITING_EDIT_REMIND1_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_rem1_text)
+            ],
+            WAITING_EDIT_REMIND2_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_rem2_text)
             ]
         },
         fallbacks=[
@@ -965,7 +1465,13 @@ def get_edit_task_handlers() -> list:
         # Reminder sub-routines
         CallbackQueryHandler(handle_edit_reminder_menu, pattern="^edit:field:reminder:[0-9a-fA-F\\-]+$"),
         CallbackQueryHandler(handle_edit_reminder_menu, pattern="^task:remind:[0-9a-fA-F\\-]+$"),  # Direct reminder alias
+        CallbackQueryHandler(handle_edit_rem1_menu, pattern="^edit:menu:rem1:[0-9a-fA-F\\-]+$"),
+        CallbackQueryHandler(handle_edit_rem2_menu, pattern="^edit:menu:rem2:[0-9a-fA-F\\-]+$"),
+        CallbackQueryHandler(handle_save_rem1_callback, pattern="^edit:save_rem1:(none|\\d+):[0-9a-fA-F\\-]+$"),
+        CallbackQueryHandler(handle_save_rem2_callback, pattern="^edit:save_rem2:(none|morning|afternoon|evening|duetime):[0-9a-fA-F\\-]+$"),
+        CallbackQueryHandler(handle_clear_reminders_callback, pattern="^edit:save_remind:clear:[0-9a-fA-F\\-]+$"),
         CallbackQueryHandler(handle_save_reminder_callback, pattern="^edit:save_remind:(none|\\d+):[0-9a-fA-F\\-]+$")
     ]
 
     return [edit_conv_handler] + callbacks
+

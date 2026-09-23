@@ -129,3 +129,106 @@ def parse_time_string(time_str: str) -> Optional[time]:
         pass
 
     return None
+
+
+def parse_advance_alert_input(
+    text: str,
+    due_dt_local: datetime
+) -> Optional[datetime]:
+    """Parse custom input for a first/advance alert.
+
+    Accepts relative specifications (e.g., '2 days', '3d', '1 week', '12 hours', '30 mins', '4')
+    or absolute date/time strings (e.g., '24/09/2026 09:00 AM', '24/09/2026 14:00', '24/09/2026').
+
+    Returns naive local datetime if valid, or None if unparseable.
+    """
+    import re
+    from datetime import timedelta
+
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+
+    # 1. Check relative expressions with units
+    m_weeks = re.match(r"^(\d+)\s*(weeks?|w)$", cleaned, re.IGNORECASE)
+    if m_weeks:
+        qty = int(m_weeks.group(1))
+        return due_dt_local - timedelta(weeks=qty)
+
+    m_days = re.match(r"^(\d+)\s*(days?|d)$", cleaned, re.IGNORECASE)
+    if m_days:
+        qty = int(m_days.group(1))
+        return due_dt_local - timedelta(days=qty)
+
+    m_hours = re.match(r"^(\d+)\s*(hours?|hrs?|h)$", cleaned, re.IGNORECASE)
+    if m_hours:
+        qty = int(m_hours.group(1))
+        return due_dt_local - timedelta(hours=qty)
+
+    m_mins = re.match(r"^(\d+)\s*(minutes?|mins?|m)$", cleaned, re.IGNORECASE)
+    if m_mins:
+        qty = int(m_mins.group(1))
+        return due_dt_local - timedelta(minutes=qty)
+
+    # 2. Check if just a bare number (assume days)
+    if cleaned.isdigit():
+        qty = int(cleaned)
+        return due_dt_local - timedelta(days=qty)
+
+    # 3. Check for absolute datetime (e.g., "24/09/2026 09:00 AM" or "24/09/2026 14:30")
+    if "/" in cleaned:
+        tokens = cleaned.split(maxsplit=1)
+        date_part = tokens[0]
+        parsed_d = parse_date_string(date_part)
+        if parsed_d:
+            if len(tokens) > 1:
+                parsed_t = parse_time_string(tokens[1])
+                target_t = parsed_t if parsed_t else time(9, 0)
+            else:
+                target_t = time(9, 0)
+            return datetime.combine(parsed_d, target_t)
+
+    return None
+
+
+def format_reminder_label(
+    remind_at: datetime,
+    due_at: datetime,
+    user_tz: str
+) -> str:
+    """Format a clean, readable label describing when a reminder triggers relative to due date."""
+    local_remind = utc_to_local(remind_at, user_tz) if remind_at.tzinfo else remind_at
+    local_due = utc_to_local(due_at, user_tz) if due_at.tzinfo else due_at
+
+    if not local_remind or not local_due:
+        return "Unknown"
+
+    time_str = local_remind.strftime("%I:%M %p").lstrip("0")
+    date_str = local_remind.strftime("%d %b")
+
+    diff = local_due - local_remind
+    diff_seconds = int(diff.total_seconds())
+
+    if diff_seconds <= 0:
+        return f"At due time ({date_str}, {time_str})"
+
+    diff_days = diff_seconds // 86400
+    diff_hours = (diff_seconds % 86400) // 3600
+    diff_mins = (diff_seconds % 3600) // 60
+
+    if diff_seconds % 86400 == 0 and diff_days > 0:
+        if diff_days == 7:
+            return f"1 week before ({date_str}, {time_str})"
+        elif diff_days == 1:
+            return f"1 day before ({date_str}, {time_str})"
+        else:
+            return f"{diff_days} days before ({date_str}, {time_str})"
+    elif diff_days > 0:
+        return f"{diff_days}d {diff_hours}h before ({date_str}, {time_str})"
+    elif diff_hours > 0:
+        return f"{diff_hours}h before ({date_str}, {time_str})"
+    elif diff_mins > 0:
+        return f"{diff_mins}m before ({date_str}, {time_str})"
+
+    return f"{date_str} at {time_str}"
+

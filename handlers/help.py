@@ -31,6 +31,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "<b>💻 Available Commands:</b>\n"
         "• /start - Launch the visual Dashboard menu\n"
         "• /help - Display this manual and command instructions\n"
+        "• /clear - Clear active chat history, delete previous menus and messages\n"
         "• /cancel - Abort active task creation or conversation states\n\n"
         "<b>⏰ Automated Smart Alerts:</b>\n"
         "• The bot runs background schedulers to send you direct reminder alerts exactly at your set notification times.\n"

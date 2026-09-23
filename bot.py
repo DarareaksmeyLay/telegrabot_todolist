@@ -16,6 +16,7 @@ from database import check_supabase_connection
 from handlers import (
     get_start_handler,
     get_help_handler,
+    get_clear_handler,
     get_menu_handlers,
     get_tasks_handlers,
     get_create_task_handler,
@@ -120,6 +121,7 @@ def main() -> None:
 
     application.add_handler(get_start_handler())
     application.add_handler(get_help_handler())
+    application.add_handler(get_clear_handler())
     application.add_handler(get_create_task_handler())
     
     # Edit task contains a ConversationHandler that needs to be registered before general callbacks

@@ -12,6 +12,7 @@ from services import (
     get_overdue_tasks,
     get_task_by_id
 )
+from database import get_supabase_client
 from keyboards import get_tasks_list_keyboard, get_task_details_keyboard
 from utils.security import authorized_only
 from utils.formatters import (
@@ -151,8 +152,17 @@ async def view_task_details_callback(update: Update, context: ContextTypes.DEFAU
         )
         return
 
-    text = format_task_detail_card(task, user_tz)
+    reminders = None
+    try:
+        client = get_supabase_client()
+        rem_res = client.table("reminders").select("*").eq("task_id", task_id).eq("status", "pending").order("remind_at", desc=False).execute()
+        reminders = rem_res.data or []
+    except Exception as exc:
+        logger.debug("Failed to fetch reminders for task card: %s", exc)
+
+    text = format_task_detail_card(task, user_tz, reminders=reminders)
     markup = get_task_details_keyboard(task_id)
+
 
     try:
         await query.edit_message_text(text=text, reply_markup=markup, parse_mode="HTML")

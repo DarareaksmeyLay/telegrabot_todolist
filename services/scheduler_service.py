@@ -8,13 +8,14 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from database import get_supabase_client
+from utils.dates import utc_to_local
 from utils.formatters import format_relative_date, format_time
 
 logger = logging.getLogger(__name__)
 
 
-def format_reminder_message(task: dict, user_timezone: str) -> str:
-    """Format a highly readable Markdown alert for task reminders."""
+def format_reminder_message(task: dict, user_timezone: str, reminder_record: Optional[dict] = None) -> str:
+    """Format a highly readable Markdown alert for task reminders, indicating 1st or 2nd Alert."""
     title = task.get("title", "Untitled")
     category = task.get("category", "personal").capitalize()
     priority = task.get("priority", "medium")
@@ -36,8 +37,24 @@ def format_reminder_message(task: dict, user_timezone: str) -> str:
         except Exception:
             due_display = "Date/Time Error"
 
+    alert_header = "🔔 <b>TASK REMINDER</b>"
+    if reminder_record and due_at_str:
+        try:
+            due_dt = datetime.fromisoformat(due_at_str.replace("Z", "+00:00"))
+            rem_str = reminder_record.get("remind_at")
+            if rem_str:
+                rem_dt = datetime.fromisoformat(rem_str.replace("Z", "+00:00"))
+                local_due = utc_to_local(due_dt, user_timezone)
+                local_rem = utc_to_local(rem_dt, user_timezone)
+                if local_due and local_rem and local_due.date() == local_rem.date():
+                    alert_header = "🔔 <b>DUE DATE ALERT (2nd Reminder)</b>"
+                else:
+                    alert_header = "🔔 <b>ADVANCE ALERT (1st Reminder)</b>"
+        except Exception:
+            pass
+
     msg = (
-        "🔔 <b>TASK REMINDER</b>\n"
+        f"{alert_header}\n"
         "────────────────\n\n"
         f"📝 <b>Name:</b> {title}\n"
         f"📁 <b>Category:</b> {category}\n"
@@ -46,6 +63,7 @@ def format_reminder_message(task: dict, user_timezone: str) -> str:
         "<i>Don't forget to complete your task! You can manage it with the buttons below:</i>"
     )
     return msg
+
 
 
 async def poll_and_dispatch_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -103,7 +121,7 @@ async def poll_and_dispatch_reminders(context: ContextTypes.DEFAULT_TYPE) -> Non
             continue
 
         # Format message content
-        text = format_reminder_message(task_data, user_timezone)
+        text = format_reminder_message(task_data, user_timezone, reminder_record=item)
 
         # Build inline action buttons for immediate, non-intrusive alert handling
         keyboard = [

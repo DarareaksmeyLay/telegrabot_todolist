@@ -19,6 +19,7 @@ from telegram.ext import (
     filters
 )
 
+from database import get_supabase_client
 from services import get_or_create_user, create_task
 from keyboards import get_main_menu_keyboard
 from utils.security import authorized_only
@@ -26,7 +27,9 @@ from utils.dates import (
     parse_date_string,
     parse_time_string,
     local_to_utc,
-    get_timezone
+    get_timezone,
+    parse_advance_alert_input,
+    format_reminder_label
 )
 from utils.formatters import (
     get_category_display,
@@ -35,7 +38,7 @@ from utils.formatters import (
 
 logger = logging.getLogger(__name__)
 
-# State Enumeration
+# State Enumeration for Dual-Alert Task Creation Wizard
 (
     WAITING_TASK_NAME,
     WAITING_CATEGORY,
@@ -44,9 +47,13 @@ logger = logging.getLogger(__name__)
     WAITING_TIME,
     WAITING_CUSTOM_TIME,
     WAITING_PRIORITY,
-    WAITING_REMINDER,
+    WAITING_FIRST_REMINDER,
+    WAITING_CUSTOM_FIRST_REMINDER,
+    WAITING_SECOND_REMINDER,
+    WAITING_CUSTOM_SECOND_REMINDER,
     WAITING_CONFIRMATION
-) = range(9)
+) = range(12)
+
 
 
 # ====================================================================
@@ -88,24 +95,13 @@ def format_draft_summary(draft: Dict[str, Any]) -> str:
     
     if due_date:
         due_date_str = due_date.strftime("%d %B %Y")
-        due_time_str = due_time.strftime("%I:%M %p").lstrip("0") if due_time else "No Time Set"
+        due_time_str = due_time.strftime("%I:%M %p").lstrip("0") if due_time else "9:00 AM (Default)"
         due_display = f"{due_date_str} • {due_time_str}"
     else:
         due_display = "🚫 No Due Date"
 
-    reminder_display = "🔕 No Reminder"
-    if due_date:
-        offset = draft.get("reminder_offset_minutes")
-        if offset == 0:
-            reminder_display = "🔔 At due time"
-        elif offset == 10:
-            reminder_display = "🔔 10 minutes before"
-        elif offset == 30:
-            reminder_display = "🔔 30 minutes before"
-        elif offset == 60:
-            reminder_display = "🔔 1 hour before"
-        elif offset == 1440:
-            reminder_display = "🔔 1 day before"
+    rem1_label = draft.get("reminder_1_label") or "🔕 None"
+    rem2_label = draft.get("reminder_2_label") or "🔕 None"
 
     summary = (
         "📝 <b>New Task Confirmation</b>\n\n"
@@ -113,7 +109,8 @@ def format_draft_summary(draft: Dict[str, Any]) -> str:
         f"📁 <b>Category:</b> {category}\n"
         f"📅 <b>Due:</b> {due_display}\n"
         f"🚩 <b>Priority:</b> {priority}\n"
-        f"🔔 <b>Reminder:</b> {reminder_display}\n\n"
+        f"🔔 <b>1st Alert (Advance):</b> {rem1_label}\n"
+        f"🔔 <b>2nd Alert (Due Date):</b> {rem2_label}\n\n"
         "Would you like to save this task?"
     )
     return summary
@@ -136,10 +133,14 @@ async def start_task_creation(update: Update, context: ContextTypes.DEFAULT_TYPE
         "due_date": None,
         "due_time": None,
         "priority": "medium",
-        "reminder_offset_minutes": None,
+        "reminder_1": None,
+        "reminder_1_label": None,
+        "reminder_2": None,
+        "reminder_2_label": None,
         "menu_message_id": query.message.message_id if query and query.message else None
     }
     context.user_data["history"] = []
+
 
     # Check if a category was preselected
     data = query.data
@@ -506,7 +507,7 @@ async def show_priority_selection_menu(reply_or_edit_func, context: ContextTypes
 
 
 async def handle_priority_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Store priority rating and transition to Reminder scheduling (or confirmation if no due date)."""
+    """Store priority rating and transition to First Alert scheduling (or confirmation if no due date)."""
     query = update.callback_query
     await query.answer()
 
@@ -520,29 +521,43 @@ async def handle_priority_callback(update: Update, context: ContextTypes.DEFAULT
     if not draft["due_date"]:
         return await show_confirmation_screen(query.edit_message_text, context)
 
-    return await show_reminder_selection_menu(query.edit_message_text, context)
+    return await show_first_reminder_menu(query.edit_message_text, context)
 
 
 # ====================================================================
-# STEP 6: REMINDER SELECTION MENU
+# STEP 6A: FIRST ALERT SELECTION MENU (ADVANCE REMINDER)
 # ====================================================================
 
-async def show_reminder_selection_menu(reply_or_edit_func, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Render reminder offsets."""
-    text = "🔔 <b>When should I remind you?</b>"
-    
+async def show_first_reminder_menu(reply_or_edit_func, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Render First Alert options: 1-4 days, 1 week, custom advance alert, or skip."""
+    draft = context.user_data["task_draft"]
+    due_d = draft.get("due_date")
+    due_t = draft.get("due_time") or time(9, 0)
+    due_str = f"{due_d.strftime('%d %b %Y')} at {due_t.strftime('%I:%M %p').lstrip('0')}" if due_d else ""
+
+    text = (
+        "🔔 <b>Step 1 of 2: First Alert (Advance Reminder)</b>\n"
+        "────────────────────\n"
+        f"📅 Task Due: <b>{due_str}</b>\n\n"
+        "Choose an advance alert before your task is due:"
+    )
+
     keyboard = [
         [
-            InlineKeyboardButton("At due time", callback_data="add:set_remind:0"),
-            InlineKeyboardButton("10 minutes before", callback_data="add:set_remind:10")
+            InlineKeyboardButton("1 day before", callback_data="add:set_remind1:1440"),
+            InlineKeyboardButton("2 days before", callback_data="add:set_remind1:2880")
         ],
         [
-            InlineKeyboardButton("30 minutes before", callback_data="add:set_remind:30"),
-            InlineKeyboardButton("1 hour before", callback_data="add:set_remind:60")
+            InlineKeyboardButton("3 days before", callback_data="add:set_remind1:4320"),
+            InlineKeyboardButton("4 days before", callback_data="add:set_remind1:5760")
         ],
         [
-            InlineKeyboardButton("1 day before", callback_data="add:set_remind:1440"),
-            InlineKeyboardButton("🔕 No Reminder", callback_data="add:set_remind:none")
+            InlineKeyboardButton("1 week before", callback_data="add:set_remind1:10080"),
+            InlineKeyboardButton("1 hour before", callback_data="add:set_remind1:60")
+        ],
+        [
+            InlineKeyboardButton("⌨️ Custom Advance Alert", callback_data="add:set_remind1:custom"),
+            InlineKeyboardButton("🔕 Skip 1st Alert", callback_data="add:set_remind1:none")
         ],
         [
             get_back_button(),
@@ -550,23 +565,303 @@ async def show_reminder_selection_menu(reply_or_edit_func, context: ContextTypes
         ]
     ]
     await reply_or_edit_func(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-    return WAITING_REMINDER
+    return WAITING_FIRST_REMINDER
 
 
-async def handle_reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Store reminder offset in minutes and show confirmation card."""
+async def handle_first_reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Process First Alert choice and proceed to Second Alert."""
     query = update.callback_query
     await query.answer()
 
     choice = query.data.split(":")[2]
-    
-    if choice == "none":
-        context.user_data["task_draft"]["reminder_offset_minutes"] = None
-    else:
-        context.user_data["task_draft"]["reminder_offset_minutes"] = int(choice)
+    draft = context.user_data["task_draft"]
 
-    push_history(context, WAITING_REMINDER)
+    if choice == "none":
+        draft["reminder_1"] = None
+        draft["reminder_1_label"] = "🔕 None"
+        push_history(context, WAITING_FIRST_REMINDER)
+        return await show_second_reminder_menu(query.edit_message_text, context)
+
+    if choice == "custom":
+        push_history(context, WAITING_FIRST_REMINDER)
+        prompt = (
+            "⌨️ <b>Custom First Alert (Advance Reminder)</b>\n\n"
+            "Type how long before your task is due (e.g. <code>2 days</code>, <code>3d</code>, <code>5 days</code>, <code>12 hours</code>, <code>30 mins</code>)\n"
+            "or enter a specific date/time (e.g. <code>24/09/2026 09:00 AM</code>):"
+        )
+        markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
+        await query.edit_message_text(text=prompt, reply_markup=markup, parse_mode="HTML")
+        return WAITING_CUSTOM_FIRST_REMINDER
+
+    # Preset minutes calculation
+    offset_minutes = int(choice)
+    user = update.effective_user
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    due_time = draft["due_time"] or time(9, 0)
+    naive_due = datetime.combine(draft["due_date"], due_time)
+    due_at_utc = local_to_utc(naive_due, user_tz)
+
+    from datetime import timedelta, timezone
+    remind_at_utc = due_at_utc - timedelta(minutes=offset_minutes)
+
+    if remind_at_utc <= datetime.now(timezone.utc):
+        await query.answer("⚠️ This alert time has already passed! Please select another option or skip.", show_alert=True)
+        return WAITING_FIRST_REMINDER
+
+    draft["reminder_1"] = remind_at_utc.isoformat()
+    draft["reminder_1_label"] = format_reminder_label(remind_at_utc, due_at_utc, user_tz)
+
+    push_history(context, WAITING_FIRST_REMINDER)
+    return await show_second_reminder_menu(query.edit_message_text, context)
+
+
+async def handle_custom_first_reminder_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Parse custom advance alert text and proceed to Second Alert."""
+    text = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    draft = context.user_data["task_draft"]
+    menu_msg_id = draft.get("menu_message_id")
+
+    async def edit_or_reply(txt, reply_markup=None, parse_mode=None):
+        if menu_msg_id:
+            try:
+                return await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=menu_msg_id,
+                    text=txt,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+            except Exception:
+                pass
+        return await update.message.reply_text(text=txt, reply_markup=reply_markup, parse_mode=parse_mode)
+
+    user = update.effective_user
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    due_time = draft["due_time"] or time(9, 0)
+    naive_due = datetime.combine(draft["due_date"], due_time)
+    due_at_utc = local_to_utc(naive_due, user_tz)
+
+    parsed_local_dt = parse_advance_alert_input(text, naive_due)
+    if not parsed_local_dt:
+        markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
+        await edit_or_reply(
+            txt="⚠️ <b>Invalid Alert Format</b>\n\n"
+                "Please enter a valid format such as:\n"
+                "• Relative: <code>2 days</code>, <code>3d</code>, <code>1 week</code>, <code>12 hours</code>\n"
+                "• Date & Time: <code>24/09/2026 09:00 AM</code>",
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+        return WAITING_CUSTOM_FIRST_REMINDER
+
+    remind_at_utc = local_to_utc(parsed_local_dt, user_tz)
+    from datetime import timezone
+    now_utc = datetime.now(timezone.utc)
+
+    if remind_at_utc >= due_at_utc:
+        markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
+        await edit_or_reply(
+            txt="⚠️ <b>Alert Must Be Before Due Time</b>\n\n"
+                "The 1st alert is an advance reminder and must be set before your task's due date and time. Please try again:",
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+        return WAITING_CUSTOM_FIRST_REMINDER
+
+    if remind_at_utc <= now_utc:
+        markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
+        await edit_or_reply(
+            txt="⚠️ <b>Past Alert Time</b>\n\n"
+                "This alert time has already passed. Please enter a future time before your task is due:",
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+        return WAITING_CUSTOM_FIRST_REMINDER
+
+    draft["reminder_1"] = remind_at_utc.isoformat()
+    draft["reminder_1_label"] = format_reminder_label(remind_at_utc, due_at_utc, user_tz)
+
+    push_history(context, WAITING_CUSTOM_FIRST_REMINDER)
+    return await show_second_reminder_menu(edit_or_reply, context)
+
+
+# ====================================================================
+# STEP 6B: SECOND ALERT SELECTION MENU (DUE DATE REMINDER)
+# ====================================================================
+
+async def show_second_reminder_menu(reply_or_edit_func, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Render Second Alert options on the due date: Morning, Afternoon, Evening, Due Time, Custom, or skip."""
+    draft = context.user_data["task_draft"]
+    due_d = draft.get("due_date")
+    due_d_str = due_d.strftime("%d %B %Y") if due_d else "Due Date"
+    due_t = draft.get("due_time")
+    due_t_str = due_t.strftime("%I:%M %p").lstrip("0") if due_t else "9:00 AM (Default)"
+
+    rem1_display = draft.get("reminder_1_label") or "🔕 None"
+
+    text = (
+        "🔔 <b>Step 2 of 2: Second Alert (Due Date Alert)</b>\n"
+        "────────────────────\n"
+        f"📅 Due Date: <b>{due_d_str}</b>\n"
+        f"1st Alert: {rem1_display}\n\n"
+        "Choose an alert time on your due date:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🌅 Morning (08:00 AM)", callback_data="add:set_remind2:morning"),
+            InlineKeyboardButton("☀️ Afternoon (01:00 PM)", callback_data="add:set_remind2:afternoon")
+        ],
+        [
+            InlineKeyboardButton("🌙 Evening (06:00 PM)", callback_data="add:set_remind2:evening"),
+            InlineKeyboardButton(f"⏰ At Due Time ({due_t_str})", callback_data="add:set_remind2:duetime")
+        ],
+        [
+            InlineKeyboardButton("⌨️ Custom Time on Due Date", callback_data="add:set_remind2:custom"),
+            InlineKeyboardButton("🔕 Skip 2nd Alert", callback_data="add:set_remind2:none")
+        ],
+        [
+            get_back_button(),
+            get_cancel_button()
+        ]
+    ]
+    await reply_or_edit_func(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return WAITING_SECOND_REMINDER
+
+
+async def handle_second_reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Process Second Alert choice and proceed to Confirmation screen."""
+    query = update.callback_query
+    await query.answer()
+
+    choice = query.data.split(":")[2]
+    draft = context.user_data["task_draft"]
+
+    if choice == "none":
+        draft["reminder_2"] = None
+        draft["reminder_2_label"] = "🔕 None"
+        push_history(context, WAITING_SECOND_REMINDER)
+        return await show_confirmation_screen(query.edit_message_text, context)
+
+    if choice == "custom":
+        push_history(context, WAITING_SECOND_REMINDER)
+        due_d = draft.get("due_date")
+        due_d_str = due_d.strftime("%d/%m/%Y") if due_d else ""
+        prompt = (
+            f"⌨️ <b>Custom Second Alert (Due Date Time)</b>\n\n"
+            f"Enter the time on your due date (<b>{due_d_str}</b>) for this alert:\n"
+            "(e.g. <code>10:30 AM</code>, <code>2:45 PM</code>, or <code>15:00</code>)"
+        )
+        markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
+        await query.edit_message_text(text=prompt, reply_markup=markup, parse_mode="HTML")
+        return WAITING_CUSTOM_SECOND_REMINDER
+
+    # Preset times
+    if choice == "morning":
+        target_time = time(8, 0)
+        label_prefix = "Due Date Morning (08:00 AM)"
+    elif choice == "afternoon":
+        target_time = time(13, 0)
+        label_prefix = "Due Date Afternoon (01:00 PM)"
+    elif choice == "evening":
+        target_time = time(18, 0)
+        label_prefix = "Due Date Evening (06:00 PM)"
+    elif choice == "duetime":
+        target_time = draft["due_time"] or time(9, 0)
+        t_str = target_time.strftime("%I:%M %p").lstrip("0")
+        label_prefix = f"At Due Time ({t_str})"
+    else:
+        target_time = time(9, 0)
+        label_prefix = "Due Date (09:00 AM)"
+
+    user = update.effective_user
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    naive_alert = datetime.combine(draft["due_date"], target_time)
+    remind_at_utc = local_to_utc(naive_alert, user_tz)
+
+    from datetime import timezone
+    if remind_at_utc <= datetime.now(timezone.utc):
+        await query.answer("⚠️ This time has already passed today! Please select another time or skip.", show_alert=True)
+        return WAITING_SECOND_REMINDER
+
+    draft["reminder_2"] = remind_at_utc.isoformat()
+    draft["reminder_2_label"] = label_prefix
+
+    push_history(context, WAITING_SECOND_REMINDER)
     return await show_confirmation_screen(query.edit_message_text, context)
+
+
+async def handle_custom_second_reminder_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Parse custom time text for the second alert on due date."""
+    text = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    draft = context.user_data["task_draft"]
+    menu_msg_id = draft.get("menu_message_id")
+
+    async def edit_or_reply(txt, reply_markup=None, parse_mode=None):
+        if menu_msg_id:
+            try:
+                return await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=menu_msg_id,
+                    text=txt,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode
+                )
+            except Exception:
+                pass
+        return await update.message.reply_text(text=txt, reply_markup=reply_markup, parse_mode=parse_mode)
+
+    parsed_time = parse_time_string(text)
+    if not parsed_time:
+        markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
+        await edit_or_reply(
+            txt="⚠️ <b>Invalid Time format</b>\n\n"
+                "Please enter a valid time (e.g. <code>10:30 AM</code>, <code>2:30 PM</code>, or <code>15:00</code>):",
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+        return WAITING_CUSTOM_SECOND_REMINDER
+
+    user = update.effective_user
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    naive_alert = datetime.combine(draft["due_date"], parsed_time)
+    remind_at_utc = local_to_utc(naive_alert, user_tz)
+
+    from datetime import timezone
+    if remind_at_utc <= datetime.now(timezone.utc):
+        markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
+        await edit_or_reply(
+            txt="⚠️ <b>Past Time</b>\n\n"
+                "This time has already passed today. Please enter a future time on your due date:",
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+        return WAITING_CUSTOM_SECOND_REMINDER
+
+    time_formatted = parsed_time.strftime("%I:%M %p").lstrip("0")
+    draft["reminder_2"] = remind_at_utc.isoformat()
+    draft["reminder_2_label"] = f"Due Date at {time_formatted}"
+
+    push_history(context, WAITING_CUSTOM_SECOND_REMINDER)
+    return await show_confirmation_screen(edit_or_reply, context)
 
 
 # ====================================================================
@@ -592,7 +887,7 @@ async def show_confirmation_screen(reply_or_edit_func, context: ContextTypes.DEF
 
 
 async def handle_save_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Commit the fully prepared task to Supabase and clean up state."""
+    """Commit the fully prepared task and both alerts to Supabase and clean up state."""
     query = update.callback_query
     await query.answer()
 
@@ -616,7 +911,7 @@ async def handle_save_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         category=draft["category"],
         priority=draft["priority"],
         due_at=due_at_utc,
-        repeat_rule="none", # Single-shot initially
+        repeat_rule="none",
         description=None
     )
 
@@ -628,31 +923,38 @@ async def handle_save_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return ConversationHandler.END
 
-    # If reminder is configured, schedule it
     task_id = saved_task.get("id")
-    offset = draft.get("reminder_offset_minutes")
-    
-    if due_at_utc and offset is not None:
+    db_user_uuid = saved_task.get("user_id")
+    client = get_supabase_client()
+
+    # Schedule 1st Alert (Advance) if set
+    rem1_iso = draft.get("reminder_1")
+    if rem1_iso:
         try:
-            from datetime import timedelta
-            remind_at_utc = due_at_utc - timedelta(minutes=offset)
-            
-            # Save reminder entry to Supabase
-            client = get_supabase_client()
-            db_user_uuid = saved_task.get("user_id")
-            
-            reminder_data = {
+            client.table("reminders").insert({
                 "task_id": task_id,
                 "user_id": db_user_uuid,
-                "remind_at": remind_at_utc.isoformat(),
+                "remind_at": rem1_iso,
                 "status": "pending"
-            }
-            client.table("reminders").insert(reminder_data).execute()
-            logger.info("Inserted reminder for task %s to trigger at %s", task_id, remind_at_utc)
-            
-            # NOTE: Reminders will be picked up by the upcoming Phase 5 Scheduler Restoration.
+            }).execute()
+            logger.info("Saved 1st alert for task %s at %s", task_id, rem1_iso)
         except Exception as exc:
-            logger.error("Error setting reminder entry: %s", exc)
+            logger.error("Error inserting 1st reminder: %s", exc)
+
+    # Schedule 2nd Alert (Due Date) if set
+    rem2_iso = draft.get("reminder_2")
+    if rem2_iso:
+        try:
+            client.table("reminders").insert({
+                "task_id": task_id,
+                "user_id": db_user_uuid,
+                "remind_at": rem2_iso,
+                "status": "pending"
+            }).execute()
+            logger.info("Saved 2nd alert for task %s at %s", task_id, rem2_iso)
+        except Exception as exc:
+            logger.error("Error inserting 2nd reminder: %s", exc)
+
 
     success_text = (
         "✅ <b>Task Created Successfully!</b>\n\n"
@@ -724,9 +1026,37 @@ async def handle_back_navigation(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["task_draft"]["priority"] = "medium"
         return await show_priority_selection_menu(query.edit_message_text, context)
 
-    elif prev_state == WAITING_REMINDER:
-        context.user_data["task_draft"]["reminder_offset_minutes"] = None
-        return await show_reminder_selection_menu(query.edit_message_text, context)
+    elif prev_state == WAITING_FIRST_REMINDER:
+        context.user_data["task_draft"]["reminder_1"] = None
+        context.user_data["task_draft"]["reminder_1_label"] = None
+        return await show_first_reminder_menu(query.edit_message_text, context)
+
+    elif prev_state == WAITING_CUSTOM_FIRST_REMINDER:
+        prompt = (
+            "⌨️ <b>Custom First Alert (Advance Reminder)</b>\n\n"
+            "Type how long before your task is due (e.g. <code>2 days</code>, <code>3d</code>, <code>5 days</code>, <code>12 hours</code>, <code>30 mins</code>)\n"
+            "or enter a specific date/time (e.g. <code>24/09/2026 09:00 AM</code>):"
+        )
+        markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
+        await query.edit_message_text(text=prompt, reply_markup=markup, parse_mode="HTML")
+        return WAITING_CUSTOM_FIRST_REMINDER
+
+    elif prev_state == WAITING_SECOND_REMINDER:
+        context.user_data["task_draft"]["reminder_2"] = None
+        context.user_data["task_draft"]["reminder_2_label"] = None
+        return await show_second_reminder_menu(query.edit_message_text, context)
+
+    elif prev_state == WAITING_CUSTOM_SECOND_REMINDER:
+        due_d = context.user_data["task_draft"].get("due_date")
+        due_d_str = due_d.strftime("%d/%m/%Y") if due_d else ""
+        prompt = (
+            f"⌨️ <b>Custom Second Alert (Due Date Time)</b>\n\n"
+            f"Enter the time on your due date (<b>{due_d_str}</b>) for this alert:\n"
+            "(e.g. <code>10:30 AM</code>, <code>2:45 PM</code>, or <code>15:00</code>)"
+        )
+        markup = InlineKeyboardMarkup([[get_back_button(), get_cancel_button()]])
+        await query.edit_message_text(text=prompt, reply_markup=markup, parse_mode="HTML")
+        return WAITING_CUSTOM_SECOND_REMINDER
 
     return ConversationHandler.END
 
@@ -785,8 +1115,17 @@ def get_create_task_handler() -> ConversationHandler:
             WAITING_PRIORITY: [
                 CallbackQueryHandler(handle_priority_callback, pattern="^add:set_priority:(high|medium|low)$")
             ],
-            WAITING_REMINDER: [
-                CallbackQueryHandler(handle_reminder_callback, pattern="^add:set_remind:(none|\\d+)$")
+            WAITING_FIRST_REMINDER: [
+                CallbackQueryHandler(handle_first_reminder_callback, pattern="^add:set_remind1:(none|custom|\\d+)$")
+            ],
+            WAITING_CUSTOM_FIRST_REMINDER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_first_reminder_text)
+            ],
+            WAITING_SECOND_REMINDER: [
+                CallbackQueryHandler(handle_second_reminder_callback, pattern="^add:set_remind2:(none|custom|morning|afternoon|evening|duetime)$")
+            ],
+            WAITING_CUSTOM_SECOND_REMINDER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_second_reminder_text)
             ],
             WAITING_CONFIRMATION: [
                 CallbackQueryHandler(handle_save_task, pattern="^add:save_task$")
@@ -800,3 +1139,4 @@ def get_create_task_handler() -> ConversationHandler:
         ],
         per_message=False
     )
+
