@@ -98,10 +98,10 @@ def format_task_detail_card(task: Dict[str, Any], user_tz: str) -> str:
     """Generate a clean, highly formatted markdown block of a task's full details."""
     title = task.get("title", "Untitled")
     description = task.get("description") or "No description provided."
-    category = get_category_display(task.get("category", "personal"))
-    priority = get_priority_display(task.get("priority", "medium"))
-    status_raw = task.get("status", "pending")
-    repeat_rule = task.get("repeat_rule", "none").capitalize()
+    category = get_category_display(task.get("category") or "personal")
+    priority = get_priority_display(task.get("priority") or "medium")
+    status_raw = task.get("status") or "pending"
+    repeat_rule = (task.get("repeat_rule") or "none").capitalize()
     
     due_at_raw = task.get("due_at")
     

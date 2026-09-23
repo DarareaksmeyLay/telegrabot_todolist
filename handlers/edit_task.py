@@ -1,11 +1,12 @@
 """Conversation and Callback handlers for editing, completing, deleting, and rescheduling tasks in Todo-list by LDR.
 
 Provides rich edit submenus (Title, Category, Due Date, Due Time, Priority, Reminder, Repeat)
-with full validations and safe back-navigation.
+with full validations, safe back-navigation, and null-safe parameter handling.
 """
 
 from __future__ import annotations
 
+import html
 import logging
 from datetime import datetime, date, time, timedelta
 from typing import Optional, Dict, Any
@@ -72,7 +73,7 @@ async def handle_complete_task_callback(update: Update, context: ContextTypes.DE
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[2]
+    task_id = query.data.split(":")[-1]
     user = update.effective_user
 
     completed_task = complete_task_by_id(task_id, user.id)
@@ -84,10 +85,10 @@ async def handle_complete_task_callback(update: Update, context: ContextTypes.DE
         )
         return
 
-    title = completed_task.get("title", "Untitled")
+    title = completed_task.get("title") or "Untitled"
     success_text = (
         f"✅ <b>Task Completed!</b>\n\n"
-        f"🎉 Great job completing:\n\"<b>{title}</b>\"\n\n"
+        f"🎉 Great job completing:\n\"<b>{html.escape(title)}</b>\"\n\n"
         f"Keep up the excellent work! 💪"
     )
 
@@ -108,7 +109,7 @@ async def handle_delete_request_callback(update: Update, context: ContextTypes.D
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[2]
+    task_id = query.data.split(":")[-1]
     user = update.effective_user
 
     task = get_task_by_id(task_id, user.id)
@@ -116,10 +117,10 @@ async def handle_delete_request_callback(update: Update, context: ContextTypes.D
         await query.edit_message_text("⚠️ Task not found.", parse_mode="HTML")
         return
 
-    title = task.get("title", "Untitled")
+    title = task.get("title") or "Untitled"
     prompt = (
         "⚠️ <b>Delete Task?</b>\n\n"
-        f"Are you sure you want to delete \"<b>{title}</b>\"?\n"
+        f"Are you sure you want to delete \"<b>{html.escape(title)}</b>\"?\n"
         "This action is permanent and cannot be undone."
     )
 
@@ -139,7 +140,7 @@ async def handle_delete_confirm_callback(update: Update, context: ContextTypes.D
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[2]
+    task_id = query.data.split(":")[-1]
     user = update.effective_user
 
     success = delete_task_by_id(task_id, user.id)
@@ -162,30 +163,28 @@ async def handle_delete_confirm_callback(update: Update, context: ContextTypes.D
 
 
 # ====================================================================
-# 2. MAIN EDIT MENU
+# 2. MAIN EDIT MENU & RENDERING HELPER
 # ====================================================================
 
-async def handle_edit_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display edit dashboard options for the selected task."""
-    query = update.callback_query
-    await query.answer()
-
-    task_id = query.data.split(":")[2]
+async def render_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, task_id: str) -> None:
+    """Render or re-render the edit dashboard menu for a given task ID."""
     user = update.effective_user
-
     task = get_task_by_id(task_id, user.id)
     if not task:
-        await query.edit_message_text("⚠️ Task not found.", parse_mode="HTML")
+        if update.callback_query:
+            await update.callback_query.edit_message_text("⚠️ Task not found.", parse_mode="HTML")
+        elif update.effective_message:
+            await update.effective_message.reply_text("⚠️ Task not found.", parse_mode="HTML")
         return
 
-    title = task.get("title", "Untitled")
-    category = get_category_display(task.get("category", "personal"))
-    priority = get_priority_display(task.get("priority", "medium"))
-    repeat_rule = task.get("repeat_rule", "none").capitalize()
+    title = task.get("title") or "Untitled"
+    category = get_category_display(task.get("category") or "personal")
+    priority = get_priority_display(task.get("priority") or "medium")
+    repeat_rule = (task.get("repeat_rule") or "none").capitalize()
 
     text = (
         "✏️ <b>Edit Task Details</b>\n\n"
-        f"<b>Title:</b> {title}\n"
+        f"<b>Title:</b> {html.escape(title)}\n"
         f"📁 <b>Category:</b> {category}\n"
         f"🚩 <b>Priority:</b> {priority}\n"
         f"🔁 <b>Repeat:</b> {repeat_rule}\n\n"
@@ -212,7 +211,21 @@ async def handle_edit_menu_callback(update: Update, context: ContextTypes.DEFAUL
             InlineKeyboardButton("🔙 Back to Details", callback_data=f"task:view:{task_id}")
         ]
     ]
-    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text=text, reply_markup=markup, parse_mode="HTML")
+    elif update.effective_message:
+        await update.effective_message.reply_text(text=text, reply_markup=markup, parse_mode="HTML")
+
+
+async def handle_edit_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display edit dashboard options for the selected task."""
+    query = update.callback_query
+    await query.answer()
+
+    task_id = query.data.split(":")[-1]
+    await render_edit_menu(update, context, task_id)
 
 
 # ====================================================================
@@ -224,14 +237,15 @@ async def handle_edit_cat_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[3]
+    task_id = query.data.split(":")[-1]
     user = update.effective_user
 
     task = get_task_by_id(task_id, user.id)
     if not task:
         return
 
-    text = f"📁 <b>Edit Category</b> for:\n\"{task.get('title')}\"\n\nChoose a category:"
+    title = task.get("title") or "Untitled"
+    text = f"📁 <b>Edit Category</b> for:\n\"{html.escape(title)}\"\n\nChoose a category:"
     keyboard = [
         [
             InlineKeyboardButton("👤 Personal", callback_data=f"edit:save_cat:personal:{task_id}"),
@@ -254,11 +268,11 @@ async def handle_save_cat_callback(update: Update, context: ContextTypes.DEFAULT
 
     parts = query.data.split(":")
     category = parts[2]
-    task_id = parts[3]
+    task_id = parts[-1]
     user = update.effective_user
 
     update_task(task_id, user.id, {"category": category})
-    await handle_edit_menu_callback(update, context)
+    await render_edit_menu(update, context, task_id)
 
 
 async def handle_edit_priority_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -266,14 +280,15 @@ async def handle_edit_priority_menu(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[3]
+    task_id = query.data.split(":")[-1]
     user = update.effective_user
 
     task = get_task_by_id(task_id, user.id)
     if not task:
         return
 
-    text = f"🚩 <b>Edit Priority</b> for:\n\"{task.get('title')}\"\n\nSelect Priority rating:"
+    title = task.get("title") or "Untitled"
+    text = f"🚩 <b>Edit Priority</b> for:\n\"{html.escape(title)}\"\n\nSelect Priority rating:"
     keyboard = [
         [
             InlineKeyboardButton("🔴 High", callback_data=f"edit:save_priority:high:{task_id}")
@@ -298,11 +313,11 @@ async def handle_save_priority_callback(update: Update, context: ContextTypes.DE
 
     parts = query.data.split(":")
     priority = parts[2]
-    task_id = parts[3]
+    task_id = parts[-1]
     user = update.effective_user
 
     update_task(task_id, user.id, {"priority": priority})
-    await handle_edit_menu_callback(update, context)
+    await render_edit_menu(update, context, task_id)
 
 
 async def handle_edit_repeat_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -310,14 +325,15 @@ async def handle_edit_repeat_menu(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[3]
+    task_id = query.data.split(":")[-1]
     user = update.effective_user
 
     task = get_task_by_id(task_id, user.id)
     if not task:
         return
 
-    text = f"🔁 <b>Edit Repeat Rule</b> for:\n\"{task.get('title')}\"\n\nChoose recurrences:"
+    title = task.get("title") or "Untitled"
+    text = f"🔁 <b>Edit Repeat Rule</b> for:\n\"{html.escape(title)}\"\n\nChoose recurrences:"
     keyboard = [
         [
             InlineKeyboardButton("🚫 Do Not Repeat", callback_data=f"edit:save_repeat:none:{task_id}")
@@ -343,26 +359,29 @@ async def handle_save_repeat_callback(update: Update, context: ContextTypes.DEFA
 
     parts = query.data.split(":")
     repeat = parts[2]
-    task_id = parts[3]
+    task_id = parts[-1]
     user = update.effective_user
 
     update_task(task_id, user.id, {"repeat_rule": repeat})
-    await handle_edit_menu_callback(update, context)
+    await render_edit_menu(update, context, task_id)
 
 
 async def handle_edit_date_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Render Date reschedule choices."""
+    """Render Date reschedule choices. Supports both edit:field:date and direct task:resched."""
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[3]
+    # Supports either edit:field:date:<id> or task:resched:<id>
+    task_id = query.data.split(":")[-1]
     user = update.effective_user
 
     task = get_task_by_id(task_id, user.id)
     if not task:
+        await query.edit_message_text("⚠️ Task not found.", parse_mode="HTML")
         return
 
-    text = f"📅 <b>Reschedule Due Date</b> for:\n\"{task.get('title')}\""
+    title = task.get("title") or "Untitled"
+    text = f"📅 <b>Reschedule Due Date</b> for:\n\"{html.escape(title)}\"\n\nSelect a new due date:"
     keyboard = [
         [
             InlineKeyboardButton("Today", callback_data=f"edit:save_date:today:{task_id}"),
@@ -373,20 +392,20 @@ async def handle_edit_date_menu(update: Update, context: ContextTypes.DEFAULT_TY
             InlineKeyboardButton("🚫 No Due Date", callback_data=f"edit:save_date:none:{task_id}")
         ],
         [
-            InlineKeyboardButton("🔙 Back", callback_data=f"task:edit:{task_id}")
+            InlineKeyboardButton("🔙 Back to Task", callback_data=f"task:view:{task_id}")
         ]
     ]
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
 async def handle_save_preset_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Commit Preset Date choice, updating task due_at and shifting any associated reminders."""
+    """Commit Preset Date choice, updating task due_at, resetting overdue to pending, and shifting reminders."""
     query = update.callback_query
     await query.answer()
 
     parts = query.data.split(":")
     choice = parts[2]
-    task_id = parts[3]
+    task_id = parts[-1]
     user = update.effective_user
 
     db_user = get_or_create_user(user)
@@ -396,15 +415,14 @@ async def handle_save_preset_date_callback(update: Update, context: ContextTypes
 
     task = get_task_by_id(task_id, user.id)
     if not task:
+        await query.edit_message_text("⚠️ Task not found.", parse_mode="HTML")
         return
 
-    # Keep original due_time if preset (else default to 9:00 AM)
     orig_due_at = task.get("due_at")
     if orig_due_at:
         try:
             clean_str = orig_due_at.replace("Z", "+00:00")
             orig_dt = datetime.fromisoformat(clean_str)
-            # convert UTC to local to extract time correctly
             import pytz
             local_dt = orig_dt.astimezone(local_tz)
             orig_time = local_dt.time()
@@ -414,15 +432,19 @@ async def handle_save_preset_date_callback(update: Update, context: ContextTypes
         orig_time = time(9, 0)
 
     if choice == "none":
-        # Remove due date
-        update_task(task_id, user.id, {"due_at": None})
-        # Reminders require due_at, cancel any associated pending reminders
+        # Remove due date and reset overdue status to pending
+        update_task(task_id, user.id, {"due_at": None, "status": "pending"})
         try:
             client = get_supabase_client()
             client.table("reminders").update({"status": "cancelled"}).eq("task_id", task_id).eq("status", "pending").execute()
         except Exception as exc:
             logger.error("Error cancelling reminders on remove due date: %s", exc)
-        await handle_edit_menu_callback(update, context)
+
+        # Show updated task details card
+        updated_task = get_task_by_id(task_id, user.id)
+        from keyboards import get_task_details_keyboard
+        success_text = f"✅ <b>Due Date Removed</b>\n\n{format_task_detail_card(updated_task or task, user_tz)}"
+        await query.edit_message_text(text=success_text, reply_markup=get_task_details_keyboard(task_id), parse_mode="HTML")
         return
 
     elif choice == "today":
@@ -435,9 +457,9 @@ async def handle_save_preset_date_callback(update: Update, context: ContextTypes
     naive_local_dt = datetime.combine(target_date, orig_time)
     due_at_utc = local_to_utc(naive_local_dt, user_tz)
 
-    update_task(task_id, user.id, {"due_at": due_at_utc.isoformat()})
+    # When rescheduled, reset status to 'pending' to clear any 'overdue' state
+    update_task(task_id, user.id, {"due_at": due_at_utc.isoformat(), "status": "pending"})
     
-    # Parse original due_at for reminder recalculation offset
     old_due_at_utc = None
     if orig_due_at:
         try:
@@ -448,8 +470,12 @@ async def handle_save_preset_date_callback(update: Update, context: ContextTypes
 
     # Recalculate and update any pending reminders
     await recalculate_reminders_for_task(task_id, due_at_utc, old_due_at_utc)
-    
-    await handle_edit_menu_callback(update, context)
+
+    # Return updated task details card with success header
+    updated_task = get_task_by_id(task_id, user.id)
+    from keyboards import get_task_details_keyboard
+    success_text = f"✅ <b>Task Rescheduled Successfully!</b>\n\n{format_task_detail_card(updated_task or task, user_tz)}"
+    await query.edit_message_text(text=success_text, reply_markup=get_task_details_keyboard(task_id), parse_mode="HTML")
 
 
 async def handle_edit_time_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -457,7 +483,7 @@ async def handle_edit_time_menu(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[3]
+    task_id = query.data.split(":")[-1]
     user = update.effective_user
 
     task = get_task_by_id(task_id, user.id)
@@ -473,7 +499,8 @@ async def handle_edit_time_menu(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    text = f"⏰ <b>Reschedule Due Time</b> for:\n\"{task.get('title')}\""
+    title = task.get("title") or "Untitled"
+    text = f"⏰ <b>Reschedule Due Time</b> for:\n\"{html.escape(title)}\""
     keyboard = [
         [
             InlineKeyboardButton("8:00 AM", callback_data=f"edit:save_time:08:00 AM:{task_id}"),
@@ -503,25 +530,26 @@ async def handle_save_preset_time_callback(update: Update, context: ContextTypes
     await query.answer()
 
     parts = query.data.split(":")
-    time_str = parts[2]
-    task_id = parts[3]
+    task_id = parts[-1]
+    time_str = ":".join(parts[2:-1])
     user = update.effective_user
 
     parsed_time = parse_time_string(time_str) or time(9, 0)
     await commit_time_change(task_id, user.id, parsed_time)
-    await handle_edit_menu_callback(update, context)
+    await render_edit_menu(update, context, task_id)
 
 
 async def handle_edit_reminder_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Render Reminder options."""
+    """Render Reminder options. Supports both edit:field:reminder and direct task:remind."""
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[3]
+    task_id = query.data.split(":")[-1]
     user = update.effective_user
 
     task = get_task_by_id(task_id, user.id)
     if not task:
+        await query.edit_message_text("⚠️ Task not found.", parse_mode="HTML")
         return
 
     if not task.get("due_at"):
@@ -532,7 +560,8 @@ async def handle_edit_reminder_menu(update: Update, context: ContextTypes.DEFAUL
         )
         return
 
-    text = f"🔔 <b>Configure Reminder</b> for:\n\"{task.get('title')}\""
+    title = task.get("title") or "Untitled"
+    text = f"🔔 <b>Configure Reminder</b> for:\n\"{html.escape(title)}\""
     keyboard = [
         [
             InlineKeyboardButton("At due time", callback_data=f"edit:save_remind:0:{task_id}"),
@@ -561,7 +590,7 @@ async def handle_save_reminder_callback(update: Update, context: ContextTypes.DE
 
     parts = query.data.split(":")
     offset_str = parts[2]
-    task_id = parts[3]
+    task_id = parts[-1]
     user = update.effective_user
 
     task = get_task_by_id(task_id, user.id)
@@ -582,7 +611,6 @@ async def handle_save_reminder_callback(update: Update, context: ContextTypes.DE
         due_at_utc = datetime.fromisoformat(due_at_str)
         remind_at_utc = due_at_utc - timedelta(minutes=offset_minutes)
 
-        # Retrieve user UUID in Supabase
         db_user = get_or_create_user(user)
         db_user_uuid = task.get("user_id")
 
@@ -597,7 +625,7 @@ async def handle_save_reminder_callback(update: Update, context: ContextTypes.DE
         except Exception as exc:
             logger.error("Error inserting reminder on edit: %s", exc)
 
-    await handle_edit_menu_callback(update, context)
+    await render_edit_menu(update, context, task_id)
 
 
 # ====================================================================
@@ -622,7 +650,7 @@ async def commit_time_change(task_id: str, telegram_user_id: int, target_time: t
     new_local_dt = datetime.combine(local_dt.date(), target_time)
     new_utc_dt = local_to_utc(new_local_dt, user_tz)
 
-    update_task(task_id, telegram_user_id, {"due_at": new_utc_dt.isoformat()})
+    update_task(task_id, telegram_user_id, {"due_at": new_utc_dt.isoformat(), "status": "pending"})
     await recalculate_reminders_for_task(task_id, new_utc_dt, due_dt_utc)
 
 
@@ -634,7 +662,6 @@ async def recalculate_reminders_for_task(
     """Sync any active pending reminders with the newly updated task due date/time."""
     client = get_supabase_client()
     try:
-        # Check if there is an active pending reminder for this task
         rem_res = client.table("reminders").select("*").eq("task_id", task_id).eq("status", "pending").execute()
         if not rem_res.data:
             return
@@ -643,20 +670,16 @@ async def recalculate_reminders_for_task(
             remind_at_str = reminder.get("remind_at").replace("Z", "+00:00")
             remind_at_dt = datetime.fromisoformat(remind_at_str)
 
-            # Calculate offset (default to 0 minutes if old_due_at_utc is not provided)
             offset = timedelta(0)
             if old_due_at_utc:
-                # Ensure both are offset-aware or both naive
                 if old_due_at_utc.tzinfo and not remind_at_dt.tzinfo:
                     remind_at_dt = remind_at_dt.replace(tzinfo=old_due_at_utc.tzinfo)
                 elif not old_due_at_utc.tzinfo and remind_at_dt.tzinfo:
                     old_due_at_utc = old_due_at_utc.replace(tzinfo=remind_at_dt.tzinfo)
                 offset = old_due_at_utc - remind_at_dt
 
-            # Apply same offset to new due_at_utc
             new_remind_at = due_at_utc - offset
 
-            # Update reminder time
             client.table("reminders").update({
                 "remind_at": new_remind_at.isoformat()
             }).eq("id", reminder["id"]).execute()
@@ -675,7 +698,7 @@ async def start_edit_title_conversation(update: Update, context: ContextTypes.DE
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[3]
+    task_id = query.data.split(":")[-1]
     context.user_data["edit_task_id"] = task_id
 
     text = "📝 <b>Edit Task Title</b>\n\nPlease type a new name for your task:"
@@ -696,7 +719,6 @@ async def handle_edit_title_text(update: Update, context: ContextTypes.DEFAULT_T
         user = update.effective_user
         update_task(task_id, user.id, {"title": text})
         
-        # Display success and load updated details card
         db_user = get_or_create_user(user)
         user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
         task = get_task_by_id(task_id, user.id)
@@ -717,7 +739,7 @@ async def start_edit_date_conversation(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[3]
+    task_id = query.data.split(":")[-1]
     context.user_data["edit_task_id"] = task_id
 
     text = (
@@ -743,7 +765,6 @@ async def handle_edit_date_text(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return WAITING_EDIT_DATE_TEXT
 
-    # Prevent past dates
     user = update.effective_user
     db_user = get_or_create_user(user)
     user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
@@ -761,7 +782,6 @@ async def handle_edit_date_text(update: Update, context: ContextTypes.DEFAULT_TY
     if task_id:
         task = get_task_by_id(task_id, user.id)
         if task:
-            # Reconstruct due_at using original due_time if preset
             orig_due_at = task.get("due_at")
             if orig_due_at:
                 try:
@@ -776,14 +796,13 @@ async def handle_edit_date_text(update: Update, context: ContextTypes.DEFAULT_TY
             naive_local_dt = datetime.combine(parsed_date, orig_time)
             due_at_utc = local_to_utc(naive_local_dt, user_tz)
 
-            update_task(task_id, user.id, {"due_at": due_at_utc.isoformat()})
+            update_task(task_id, user.id, {"due_at": due_at_utc.isoformat(), "status": "pending"})
             await recalculate_reminders_for_task(task_id, due_at_utc)
 
-            # Show details card
             updated_task = get_task_by_id(task_id, user.id)
             from keyboards import get_task_details_keyboard
             await update.message.reply_text(
-                f"✅ <b>Due Date Updated Successfully!</b>\n\n{format_task_detail_card(updated_task, user_tz)}",
+                f"✅ <b>Due Date Updated Successfully!</b>\n\n{format_task_detail_card(updated_task or task, user_tz)}",
                 reply_markup=get_task_details_keyboard(task_id),
                 parse_mode="HTML"
             )
@@ -797,7 +816,7 @@ async def start_edit_time_conversation(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     await query.answer()
 
-    task_id = query.data.split(":")[3]
+    task_id = query.data.split(":")[-1]
     context.user_data["edit_task_id"] = task_id
 
     text = (
@@ -827,7 +846,6 @@ async def handle_edit_time_text(update: Update, context: ContextTypes.DEFAULT_TY
         user = update.effective_user
         await commit_time_change(task_id, user.id, parsed_time)
 
-        # Show details
         db_user = get_or_create_user(user)
         user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
         updated_task = get_task_by_id(task_id, user.id)
@@ -845,24 +863,39 @@ async def handle_edit_time_text(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_edit_cancellation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Safely abort current text input and load the details card."""
-    query = update.callback_query
-    await query.answer()
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+        except Exception:
+            pass
+        task_id = context.user_data.get("edit_task_id") or update.callback_query.data.split(":")[-1]
+    else:
+        task_id = context.user_data.get("edit_task_id")
 
-    task_id = context.user_data.get("edit_task_id") or query.data.split(":")[2]
     context.user_data.pop("edit_task_id", None)
 
-    user = update.effective_user
-    db_user = get_or_create_user(user)
-    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+    if task_id:
+        user = update.effective_user
+        db_user = get_or_create_user(user)
+        user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
 
-    task = get_task_by_id(task_id, user.id)
-    if task:
-        from keyboards import get_task_details_keyboard
-        await query.edit_message_text(
-            text=format_task_detail_card(task, user_tz),
-            reply_markup=get_task_details_keyboard(task_id),
-            parse_mode="HTML"
-        )
+        task = get_task_by_id(task_id, user.id)
+        if task:
+            from keyboards import get_task_details_keyboard
+            markup = get_task_details_keyboard(task_id)
+            card_text = format_task_detail_card(task, user_tz)
+            if update.callback_query:
+                await update.callback_query.edit_message_text(
+                    text=card_text,
+                    reply_markup=markup,
+                    parse_mode="HTML"
+                )
+            elif update.effective_message:
+                await update.effective_message.reply_text(
+                    text=card_text,
+                    reply_markup=markup,
+                    parse_mode="HTML"
+                )
 
     return ConversationHandler.END
 
@@ -922,7 +955,7 @@ def get_edit_task_handlers() -> list:
         
         # Due Date sub-routines
         CallbackQueryHandler(handle_edit_date_menu, pattern="^edit:field:date:[0-9a-fA-F\\-]+$"),
-        CallbackQueryHandler(handle_edit_date_menu, pattern="^task:resched:[0-9a-fA-F\\-]+$"), # Direct reschedule alias
+        CallbackQueryHandler(handle_edit_date_menu, pattern="^task:resched:[0-9a-fA-F\\-]+$"),  # Direct reschedule alias
         CallbackQueryHandler(handle_save_preset_date_callback, pattern="^edit:save_date:(today|tomorrow|none):[0-9a-fA-F\\-]+$"),
         
         # Due Time sub-routines
@@ -931,7 +964,7 @@ def get_edit_task_handlers() -> list:
 
         # Reminder sub-routines
         CallbackQueryHandler(handle_edit_reminder_menu, pattern="^edit:field:reminder:[0-9a-fA-F\\-]+$"),
-        CallbackQueryHandler(handle_edit_reminder_menu, pattern="^task:remind:[0-9a-fA-F\\-]+$"), # Direct reminder alias
+        CallbackQueryHandler(handle_edit_reminder_menu, pattern="^task:remind:[0-9a-fA-F\\-]+$"),  # Direct reminder alias
         CallbackQueryHandler(handle_save_reminder_callback, pattern="^edit:save_remind:(none|\\d+):[0-9a-fA-F\\-]+$")
     ]
 

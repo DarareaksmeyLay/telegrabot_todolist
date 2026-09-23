@@ -137,7 +137,7 @@ async def view_task_details_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
 
     # Data format: task:view:<id>
-    task_id = query.data.split(":")[2]
+    task_id = query.data.split(":")[-1]
     user = update.effective_user
     db_user = get_or_create_user(user)
     user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
