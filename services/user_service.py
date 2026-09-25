@@ -11,15 +11,36 @@ from utils.dates import get_timezone
 logger = logging.getLogger(__name__)
 
 
-def get_or_create_user(telegram_user: User) -> Dict[str, Any]:
+def get_or_create_user(telegram_user: Any) -> Dict[str, Any]:
     """Retrieve existing user or register them instantly on /start command.
 
     Maintains accurate profile data (username, first name) in Supabase.
+    Safely accepts telegram.User instance, integer user_id, or dictionary.
     """
     client = get_supabase_client()
-    tg_id = telegram_user.id
-    username = telegram_user.username
-    first_name = telegram_user.first_name
+    
+    # Extract identity fields safely
+    if isinstance(telegram_user, int):
+        tg_id = telegram_user
+        username = None
+        first_name = None
+    elif hasattr(telegram_user, "id"):
+        tg_id = telegram_user.id
+        username = getattr(telegram_user, "username", None)
+        first_name = getattr(telegram_user, "first_name", None)
+    elif isinstance(telegram_user, dict):
+        tg_id = telegram_user.get("id") or telegram_user.get("telegram_user_id") or 0
+        username = telegram_user.get("username") or telegram_user.get("telegram_username")
+        first_name = telegram_user.get("first_name")
+    else:
+        try:
+            tg_id = int(telegram_user)
+            username = None
+            first_name = None
+        except Exception:
+            tg_id = 0
+            username = None
+            first_name = None
 
     try:
         # Check if user already exists
@@ -28,10 +49,15 @@ def get_or_create_user(telegram_user: User) -> Dict[str, Any]:
         if res.data:
             user_row = res.data[0]
             # Proactively update username/first_name if they changed
-            if user_row.get("telegram_username") != username or user_row.get("first_name") != first_name:
+            update_fields = {}
+            if username and user_row.get("telegram_username") != username:
+                update_fields["telegram_username"] = username
+            if first_name and user_row.get("first_name") != first_name:
+                update_fields["first_name"] = first_name
+            if update_fields:
                 update_res = (
                     client.table("users")
-                    .update({"telegram_username": username, "first_name": first_name})
+                    .update(update_fields)
                     .eq("telegram_user_id", tg_id)
                     .execute()
                 )

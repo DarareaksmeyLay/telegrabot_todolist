@@ -192,8 +192,57 @@ def count_dashboard_stats(telegram_user_id: int) -> Dict[str, int]:
         return stats
 
 
+import calendar
+from datetime import datetime, timezone, timedelta
+
+
+def compute_next_recurrence(due_at_str: Optional[str], repeat_rule: str) -> datetime:
+    """Calculate the next upcoming UTC datetime for a repeating task."""
+    now_utc = datetime.now(timezone.utc)
+    
+    if due_at_str:
+        try:
+            clean_str = due_at_str.replace("Z", "+00:00")
+            base_dt = datetime.fromisoformat(clean_str)
+            if base_dt.tzinfo is None:
+                base_dt = base_dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            base_dt = now_utc
+    else:
+        base_dt = now_utc
+
+    next_dt = base_dt
+    # Loop until the recurrence target is in the future
+    for _ in range(100):
+        if repeat_rule == "daily":
+            next_dt = next_dt + timedelta(days=1)
+        elif repeat_rule == "weekdays":
+            next_dt = next_dt + timedelta(days=1)
+            while next_dt.weekday() >= 5:  # 5=Saturday, 6=Sunday
+                next_dt = next_dt + timedelta(days=1)
+        elif repeat_rule == "weekly":
+            next_dt = next_dt + timedelta(weeks=1)
+        elif repeat_rule == "monthly":
+            year = next_dt.year + (next_dt.month // 12)
+            month = 1 if next_dt.month == 12 else next_dt.month + 1
+            max_days = calendar.monthrange(year, month)[1]
+            day = min(next_dt.day, max_days)
+            next_dt = next_dt.replace(year=year, month=month, day=day)
+        else:
+            break
+
+        if next_dt > now_utc:
+            break
+
+    return next_dt
+
+
 def complete_task_by_id(task_id: str, telegram_user_id: int) -> Optional[Dict[str, Any]]:
-    """Mark a task as completed in Supabase. Sets completed_at timestamp to UTC now."""
+    """Mark a task as completed in Supabase. Sets completed_at timestamp to UTC now.
+    
+    If the task has a repeat_rule (daily, weekdays, weekly, monthly), automatically creates
+    the next scheduled task occurrence and carries forward any active reminders.
+    """
     client = get_supabase_client()
     try:
         # Security: verify ownership first
@@ -213,10 +262,65 @@ def complete_task_by_id(task_id: str, telegram_user_id: int) -> Optional[Dict[st
         # Deactivate associated pending reminders for this completed task
         client.table("reminders").update({"status": "cancelled"}).eq("task_id", task_id).eq("status", "pending").execute()
 
-        if res.data:
-            logger.info("Marked task %s as completed.", task_id)
-            return res.data[0]
-        return None
+        if not res.data:
+            return None
+
+        completed_data = res.data[0]
+
+        # Check if this task repeats
+        repeat_rule = (task.get("repeat_rule") or "none").lower()
+        if repeat_rule in ["daily", "weekdays", "weekly", "monthly"]:
+            try:
+                next_due_utc = compute_next_recurrence(task.get("due_at"), repeat_rule)
+                new_task = {
+                    "user_id": task["user_id"],
+                    "title": task["title"],
+                    "description": task.get("description"),
+                    "category": task.get("category", "personal"),
+                    "priority": task.get("priority", "medium"),
+                    "due_at": next_due_utc.isoformat(),
+                    "status": "pending",
+                    "repeat_rule": repeat_rule
+                }
+                new_task_res = client.table("tasks").insert(new_task).execute()
+                if new_task_res.data:
+                    next_task_obj = new_task_res.data[0]
+                    completed_data["next_task"] = next_task_obj
+                    logger.info("Auto-spawned recurring task %s (due %s) from %s", next_task_obj["id"], next_due_utc, task_id)
+                    
+                    # Re-create active reminders with matching time offsets
+                    if task.get("due_at"):
+                        try:
+                            clean_old = task.get("due_at").replace("Z", "+00:00")
+                            old_due_dt = datetime.fromisoformat(clean_old)
+                            if old_due_dt.tzinfo is None:
+                                old_due_dt = old_due_dt.replace(tzinfo=timezone.utc)
+                            
+                            # Get reminders that existed before cancellation
+                            old_rems_res = client.table("reminders").select("*").eq("task_id", task_id).execute()
+                            for r in (old_rems_res.data or []):
+                                r_clean = r.get("remind_at", "").replace("Z", "+00:00")
+                                r_dt = datetime.fromisoformat(r_clean)
+                                if r_dt.tzinfo is None:
+                                    r_dt = r_dt.replace(tzinfo=timezone.utc)
+                                
+                                offset = old_due_dt - r_dt
+                                new_remind_at = next_due_utc - offset
+                                if new_remind_at > datetime.now(timezone.utc):
+                                    client.table("reminders").insert({
+                                        "task_id": next_task_obj["id"],
+                                        "user_id": task["user_id"],
+                                        "remind_at": new_remind_at.isoformat(),
+                                        "status": "pending"
+                                    }).execute()
+                                    logger.info("Cloned reminder for recurring task %s at %s", next_task_obj["id"], new_remind_at)
+                        except Exception as rem_exc:
+                            logger.error("Error cloning reminders for recurring task: %s", rem_exc)
+            except Exception as rec_exc:
+                logger.error("Error creating next recurrence for task %s: %s", task_id, rec_exc)
+
+        logger.info("Marked task %s as completed.", task_id)
+        return completed_data
     except Exception as exc:
         logger.error("Error completing task %s: %s", task_id, exc)
         return None

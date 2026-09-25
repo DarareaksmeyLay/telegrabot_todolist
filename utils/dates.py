@@ -192,19 +192,26 @@ def parse_advance_alert_input(
 
 
 def format_reminder_label(
-    remind_at: datetime,
-    due_at: datetime,
+    remind_at: Any,
+    due_at: Any,
     user_tz: str
 ) -> str:
     """Format a clean, readable label describing when a reminder triggers relative to due date."""
-    local_remind = utc_to_local(remind_at, user_tz) if remind_at.tzinfo else remind_at
-    local_due = utc_to_local(due_at, user_tz) if due_at.tzinfo else due_at
+    if not remind_at:
+        return "🔕 Not set"
 
-    if not local_remind or not local_due:
-        return "Unknown"
+    # utc_to_local cleanly handles both ISO string and datetime instances
+    local_remind = utc_to_local(remind_at, user_tz) if (isinstance(remind_at, str) or getattr(remind_at, "tzinfo", None)) else remind_at
+    local_due = utc_to_local(due_at, user_tz) if (isinstance(due_at, str) or getattr(due_at, "tzinfo", None)) else due_at
+
+    if not local_remind:
+        return "🔕 Not set"
 
     time_str = local_remind.strftime("%I:%M %p").lstrip("0")
     date_str = local_remind.strftime("%d %b")
+
+    if not local_due:
+        return f"{date_str} at {time_str}"
 
     diff = local_due - local_remind
     diff_seconds = int(diff.total_seconds())

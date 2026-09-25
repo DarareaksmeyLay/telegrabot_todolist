@@ -84,11 +84,14 @@ def format_relative_date(target_dt: Optional[datetime], tz_name: str) -> str:
         return target_date.strftime("%d %B %Y")
 
 
-def format_time(target_dt: Optional[datetime], tz_name: str) -> str:
+from database import get_supabase_client
+
+
+def format_time(target_dt: Any, tz_name: str) -> str:
     """Format time component cleanly in 12-hour format (e.g. '3:00 PM')."""
     if not target_dt:
         return ""
-    local_dt = utc_to_local(target_dt, tz_name)
+    local_dt = utc_to_local(target_dt, tz_name) if (isinstance(target_dt, str) or getattr(target_dt, "tzinfo", None)) else target_dt
     if not local_dt:
         return ""
     return local_dt.strftime("%I:%M %p").lstrip("0")
@@ -142,35 +145,49 @@ def format_task_detail_card(
     else:
         status_display = "⏳ Pending"
 
-    # Format alerts if provided or attached
+    # Automatically query reminders if not passed and task has an ID
     alerts_text = ""
-    rems = reminders if reminders is not None else task.get("reminders")
-    if rems:
-        # Sort pending reminders
-        pending_rems = [r for r in rems if r.get("status") == "pending"]
-        if pending_rems:
-            pending_rems.sort(key=lambda x: str(x.get("remind_at", "")))
-            lines = []
-            if len(pending_rems) >= 2:
-                r1 = pending_rems[0]
-                r2 = pending_rems[1]
-                lines.append(f"• 1st Alert (Advance): {format_reminder_label(r1.get('remind_at'), due_at_raw, user_tz)}")
-                r2_date = format_relative_date(r2.get("remind_at"), user_tz)
-                r2_time = format_time(r2.get("remind_at"), user_tz)
-                lines.append(f"• 2nd Alert (Due Date): {r2_date} at {r2_time}")
-            elif len(pending_rems) == 1:
-                r = pending_rems[0]
-                local_r = utc_to_local(r.get("remind_at"), user_tz)
-                local_due = utc_to_local(due_at_raw, user_tz) if due_at_raw else None
-                if local_r and local_due and local_r.date() == local_due.date():
-                    r_time = format_time(r.get("remind_at"), user_tz)
-                    lines.append(f"• 2nd Alert (Due Date): At {r_time}")
-                else:
-                    lines.append(f"• 1st Alert (Advance): {format_reminder_label(r.get('remind_at'), due_at_raw, user_tz)}")
-            if lines:
-                alerts_text = f"\n🔔 <b>Alerts:</b>\n" + "\n".join(lines)
-    elif due_at_raw:
-        alerts_text = "\n🔔 <b>Alerts:</b> 🔕 None set"
+    rems = reminders
+    if rems is None and task.get("id"):
+        try:
+            client = get_supabase_client()
+            rem_res = client.table("reminders").select("*").eq("task_id", task["id"]).eq("status", "pending").order("remind_at", desc=False).execute()
+            rems = rem_res.data or []
+        except Exception:
+            rems = []
+    elif rems is None:
+        rems = task.get("reminders")
+
+    try:
+        if rems:
+            # Sort pending reminders
+            pending_rems = [r for r in rems if r.get("status") == "pending"]
+            if pending_rems:
+                pending_rems.sort(key=lambda x: str(x.get("remind_at", "")))
+                lines = []
+                if len(pending_rems) >= 2:
+                    r1 = pending_rems[0]
+                    r2 = pending_rems[1]
+                    lines.append(f"• 1st Alert (Advance): {format_reminder_label(r1.get('remind_at'), due_at_raw, user_tz)}")
+                    r2_date = format_relative_date(r2.get("remind_at"), user_tz)
+                    r2_time = format_time(r2.get("remind_at"), user_tz)
+                    lines.append(f"• 2nd Alert (Due Date): {r2_date} at {r2_time}")
+                elif len(pending_rems) == 1:
+                    r = pending_rems[0]
+                    local_r = utc_to_local(r.get("remind_at"), user_tz)
+                    local_due = utc_to_local(due_at_raw, user_tz) if due_at_raw else None
+                    if local_r and local_due and local_r.date() == local_due.date():
+                        r_time = format_time(r.get("remind_at"), user_tz)
+                        lines.append(f"• 2nd Alert (Due Date): At {r_time}")
+                    else:
+                        lines.append(f"• 1st Alert (Advance): {format_reminder_label(r.get('remind_at'), due_at_raw, user_tz)}")
+                if lines:
+                    alerts_text = f"\n🔔 <b>Alerts:</b>\n" + "\n".join(lines)
+        elif due_at_raw:
+            alerts_text = "\n🔔 <b>Alerts:</b> 🔕 None set"
+    except Exception:
+        if due_at_raw:
+            alerts_text = "\n🔔 <b>Alerts:</b> 🔕 None set"
 
 
     card = (
