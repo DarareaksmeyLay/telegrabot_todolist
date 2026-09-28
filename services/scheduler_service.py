@@ -200,7 +200,10 @@ def format_overdue_alert_message(task: dict, user_timezone: str) -> str:
 
 
 async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check Supabase for overdue tasks with status 'pending' every minute, update their status to 'overdue', and trigger direct alerts immediately."""
+    """Check Supabase for overdue tasks with status 'pending' periodically, update their status to 'overdue', and trigger direct alerts immediately.
+    
+    Prevents duplicate alerts by checking for an 'overdue_sent' sentinel record in the reminders table.
+    """
     logger.info("Executing periodic check for overdue tasks (check_pending_reminders)...")
     client = get_supabase_client()
     now_utc_dt = datetime.now(timezone.utc)
@@ -228,6 +231,10 @@ async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     for task in overdue_tasks:
         task_id = task.get("id")
         user_data = task.get("users")
+        due_at = task.get("due_at")
+
+        if not due_at:
+            continue
 
         # Normalize relation formats
         if isinstance(user_data, list) and user_data:
@@ -244,7 +251,23 @@ async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.warning("User for overdue task %s has no telegram_user_id. Skipping.", task_id)
             continue
 
-        # 1. Update status to 'overdue' in Supabase to avoid double alerting
+        # 0. Prevent double alerting: check if we already sent an overdue alert for this specific due_at timestamp
+        try:
+            dup_check = (
+                client.table("reminders")
+                .select("id")
+                .eq("task_id", task_id)
+                .eq("remind_at", due_at)
+                .eq("status", "sent")
+                .execute()
+            )
+            if dup_check.data:
+                logger.info("Overdue alert sentinel already exists for task %s at %s. Skipping duplicate alert.", task_id, due_at)
+                continue
+        except Exception as exc:
+            logger.error("Error checking duplicate overdue sentinel for task %s: %s", task_id, exc)
+
+        # 1. Update status to 'overdue' in Supabase (may fail if db constraints prevent it, but we still try)
         try:
             client.table("tasks").update({"status": "overdue"}).eq("id", task_id).execute()
             logger.info("Successfully transitioned task %s to 'overdue' in Supabase.", task_id)
@@ -257,7 +280,20 @@ async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as exc:
             logger.error("Failed to cancel pending reminders for overdue task %s: %s", task_id, exc)
 
-        # 3. Deliver immediate overdue notification message to the Telegram user
+        # 3. Create a sent alert sentinel in reminders table to ensure we NEVER double alert for this task's due_at
+        try:
+            client.table("reminders").insert({
+                "task_id": task_id,
+                "user_id": user_data.get("id"),
+                "remind_at": due_at,
+                "status": "sent",
+                "sent_at": datetime.utcnow().isoformat()
+            }).execute()
+            logger.info("Created overdue alert sentinel in reminders for task %s.", task_id)
+        except Exception as exc:
+            logger.error("Failed to create overdue sentinel in reminders table for task %s: %s", task_id, exc)
+
+        # 4. Deliver immediate overdue notification message to the Telegram user
         text = format_overdue_alert_message(task, user_timezone)
 
         keyboard = [

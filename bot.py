@@ -147,10 +147,10 @@ def main() -> None:
             first=10,
             name="poll_and_dispatch_reminders"
         )
-        # Check for overdue tasks runs every 60 seconds (every minute), with an initial 15-second delay
+        # Check for overdue tasks runs every 5 minutes (300 seconds), with an initial 15-second delay
         application.job_queue.run_repeating(
             check_pending_reminders,
-            interval=60,
+            interval=300,
             first=15,
             name="check_pending_reminders"
         )

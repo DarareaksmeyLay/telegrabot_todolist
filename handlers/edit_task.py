@@ -455,7 +455,7 @@ async def handle_edit_date_menu(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     title = task.get("title") or "Untitled"
-    text = f"📅 <b>Reschedule Due Date</b> for:\n\"{html.escape(title)}\"\n\nSelect a new due date:"
+    text = f"📅 <b>Reschedule Due Date</b> for:\n\"{html.escape(title)}\"\n\nSelect a new due date or change the due hour:"
     keyboard = [
         [
             InlineKeyboardButton("Today", callback_data=f"edit:save_date:today:{task_id}"),
@@ -463,6 +463,9 @@ async def handle_edit_date_menu(update: Update, context: ContextTypes.DEFAULT_TY
         ],
         [
             InlineKeyboardButton("📅 Choose Date", callback_data=f"edit:save_date:custom:{task_id}"),
+            InlineKeyboardButton("⏰ Change Due Time", callback_data=f"edit:field:time:{task_id}")
+        ],
+        [
             InlineKeyboardButton("🚫 No Due Date", callback_data=f"edit:save_date:none:{task_id}")
         ],
         [
@@ -601,6 +604,7 @@ async def handle_edit_time_menu(update: Update, context: ContextTypes.DEFAULT_TY
             InlineKeyboardButton("⌨️ Custom Time", callback_data=f"edit:save_time:custom:{task_id}")
         ],
         [
+            InlineKeyboardButton("📅 Change Due Date", callback_data=f"edit:field:date:{task_id}"),
             InlineKeyboardButton("🔙 Back to Edit Menu", callback_data=f"task:edit:{task_id}")
         ]
     ]
