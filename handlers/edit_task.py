@@ -93,6 +93,9 @@ async def handle_complete_task_callback(update: Update, context: ContextTypes.DE
         )
         return
 
+    from services.scheduler_service import reset_task_alert_state
+    reset_task_alert_state(task_id)
+
     title = completed_task.get("title") or "Untitled"
     next_task = completed_task.get("next_task")
     if next_task:
@@ -177,10 +180,78 @@ async def handle_delete_confirm_callback(update: Update, context: ContextTypes.D
         )
         return
 
+    from services.scheduler_service import reset_task_alert_state
+    reset_task_alert_state(task_id)
+
     text = "🗑 <b>Task Deleted Successfully.</b>"
     keyboard = [
         [
             InlineKeyboardButton("📋 Show Tasks", callback_data="menu:tasks"),
+            InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")
+        ]
+    ]
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def handle_snooze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Snooze a task reminder by 5 minutes (or specified minutes) and confirm."""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split(":")
+    task_id = parts[2]
+    minutes = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 5
+
+    user = update.effective_user
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+
+    task = get_task_by_id(task_id, user.id)
+    if not task:
+        await query.edit_message_text("⚠️ Task not found or already deleted.", parse_mode="HTML")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    snooze_utc = now_utc + timedelta(minutes=minutes)
+
+    client = get_supabase_client()
+    try:
+        user_uuid = db_user.get("id")
+        client.table("reminders").insert({
+            "task_id": task_id,
+            "user_id": user_uuid,
+            "remind_at": snooze_utc.isoformat(),
+            "status": "pending"
+        }).execute()
+        logger.info("Created snooze reminder for task %s (+%s min)", task_id, minutes)
+    except Exception as exc:
+        logger.error("Failed to insert snooze reminder for task %s: %s", task_id, exc)
+
+    from services.scheduler_service import reset_task_alert_state
+    reset_task_alert_state(task_id)
+
+    local_snooze = utc_to_local(snooze_utc, user_tz)
+    time_str = local_snooze.strftime("%I:%M %p").lstrip("0") if local_snooze else f"{minutes} minutes"
+
+    title = task.get("title") or "Untitled"
+    text = (
+        "⏰ <b>Task Reminder Snoozed</b>\n"
+        "────────────────────\n\n"
+        f"📝 <b>{html.escape(title)}</b>\n\n"
+        f"💤 Snoozed for <b>{minutes} minutes</b>.\n"
+        f"🔔 Next alert: <b>{time_str}</b>\n\n"
+        "<i>Need to adjust further or finish early? Use the buttons below:</i>"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Mark Completed", callback_data=f"task:done:{task_id}")
+        ],
+        [
+            InlineKeyboardButton("📅 Change Date", callback_data=f"edit:field:date:{task_id}"),
+            InlineKeyboardButton("⏰ Change Hour", callback_data=f"edit:field:time:{task_id}")
+        ],
+        [
             InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")
         ]
     ]
@@ -455,7 +526,7 @@ async def handle_edit_date_menu(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     title = task.get("title") or "Untitled"
-    text = f"📅 <b>Reschedule Due Date</b> for:\n\"{html.escape(title)}\"\n\nSelect a new due date or change the due hour:"
+    text = f"📅 <b>Reschedule Due Date & Hour</b> for:\n\"{html.escape(title)}\"\n\nSelect a new due date or change the due hour:"
     keyboard = [
         [
             InlineKeyboardButton("Today", callback_data=f"edit:save_date:today:{task_id}"),
@@ -463,7 +534,7 @@ async def handle_edit_date_menu(update: Update, context: ContextTypes.DEFAULT_TY
         ],
         [
             InlineKeyboardButton("📅 Choose Date", callback_data=f"edit:save_date:custom:{task_id}"),
-            InlineKeyboardButton("⏰ Change Due Time", callback_data=f"edit:field:time:{task_id}")
+            InlineKeyboardButton("⏰ Change Due Hour", callback_data=f"edit:field:time:{task_id}")
         ],
         [
             InlineKeyboardButton("🚫 No Due Date", callback_data=f"edit:save_date:none:{task_id}")
@@ -536,6 +607,8 @@ async def handle_save_preset_date_callback(update: Update, context: ContextTypes
 
     # When rescheduled, reset status to 'pending' to clear any 'overdue' state
     update_task(task_id, user.id, {"due_at": due_at_utc.isoformat(), "status": "pending"})
+    from services.scheduler_service import reset_task_alert_state
+    reset_task_alert_state(task_id)
     
     old_due_at_utc = None
     if orig_due_at:
@@ -565,27 +638,19 @@ async def handle_edit_time_menu(update: Update, context: ContextTypes.DEFAULT_TY
 
     task = get_task_by_id(task_id, user.id)
     if not task:
-        return
-
-    # Checking if there is a due date
-    if not task.get("due_at"):
-        await query.edit_message_text(
-            "⚠️ <b>Due Date Required</b>\n\nYou must set a Due Date before configuring a Due Time.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📅 Set Due Date", callback_data=f"edit:field:date:{task_id}")]]) ,
-            parse_mode="HTML"
-        )
+        await query.edit_message_text("⚠️ Task not found.", parse_mode="HTML")
         return
 
     title = task.get("title") or "Untitled"
     db_user = get_or_create_user(user)
     user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
-    current_time_str = format_time(task.get("due_at"), user_tz) if task.get("due_at") else "Not set"
+    current_time_str = format_time(task.get("due_at"), user_tz) if task.get("due_at") else "Not set (defaults to today)"
 
     text = (
-        f"⏰ <b>Reschedule Due Time</b>\n\n"
+        f"⏰ <b>Reschedule Due Hour / Time</b>\n\n"
         f"📝 <b>{html.escape(title)}</b>\n"
         f"Current Time: <b>{current_time_str}</b>\n\n"
-        "Select a preset time or enter a custom time:"
+        "Select a preset hour or enter a custom time:"
     )
     keyboard = [
         [
@@ -601,11 +666,11 @@ async def handle_edit_time_menu(update: Update, context: ContextTypes.DEFAULT_TY
             InlineKeyboardButton("07:00 PM", callback_data=f"edit:save_time:07:00 PM:{task_id}")
         ],
         [
-            InlineKeyboardButton("⌨️ Custom Time", callback_data=f"edit:save_time:custom:{task_id}")
+            InlineKeyboardButton("⌨️ Custom Hour/Time", callback_data=f"edit:save_time:custom:{task_id}")
         ],
         [
             InlineKeyboardButton("📅 Change Due Date", callback_data=f"edit:field:date:{task_id}"),
-            InlineKeyboardButton("🔙 Back to Edit Menu", callback_data=f"task:edit:{task_id}")
+            InlineKeyboardButton("🔙 Back to Task", callback_data=f"task:view:{task_id}")
         ]
     ]
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -629,7 +694,13 @@ async def handle_save_preset_time_callback(update: Update, context: ContextTypes
     await commit_time_change(task_id, user.id, parsed_time)
     formatted_t = parsed_time.strftime("%I:%M %p").lstrip("0")
     await query.answer(f"⏰ Due time updated to {formatted_t}", show_alert=False)
-    await render_edit_menu(update, context, task_id)
+
+    db_user = get_or_create_user(user)
+    user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
+    updated_task = get_task_by_id(task_id, user.id)
+    from keyboards import get_task_details_keyboard
+    success_text = f"✅ <b>Due Time Updated to {formatted_t}!</b>\n\n{format_task_detail_card(updated_task, user_tz)}"
+    await query.edit_message_text(text=success_text, reply_markup=get_task_details_keyboard(task_id), parse_mode="HTML")
 
 
 def _get_task_reminders(task_id: str, user_tz: str, due_at_utc: Optional[datetime] = None):
@@ -1015,23 +1086,35 @@ async def handle_save_reminder_callback(update: Update, context: ContextTypes.DE
 async def commit_time_change(task_id: str, telegram_user_id: int, target_time: time) -> None:
     """Assemble date and new time into localized due_at, then push to Supabase."""
     task = get_task_by_id(task_id, telegram_user_id)
-    if not task or not task.get("due_at"):
+    if not task:
         return
 
     db_user = get_or_create_user(telegram_user_id)
     user_tz = db_user.get("timezone", "Asia/Phnom_Penh")
     local_tz = get_timezone(user_tz)
 
-    due_at_str = task.get("due_at").replace("Z", "+00:00")
-    due_dt_utc = datetime.fromisoformat(due_at_str)
-    local_dt = due_dt_utc.astimezone(local_tz)
+    due_dt_utc = None
+    if task.get("due_at"):
+        try:
+            due_at_str = task.get("due_at").replace("Z", "+00:00")
+            due_dt_utc = datetime.fromisoformat(due_at_str)
+            local_dt = due_dt_utc.astimezone(local_tz)
+            local_date = local_dt.date()
+        except Exception:
+            local_date = datetime.now(local_tz).date()
+    else:
+        local_date = datetime.now(local_tz).date()
 
     # Re-combine local date with new local time
-    new_local_dt = datetime.combine(local_dt.date(), target_time)
+    new_local_dt = datetime.combine(local_date, target_time)
     new_utc_dt = local_to_utc(new_local_dt, user_tz)
 
     update_task(task_id, telegram_user_id, {"due_at": new_utc_dt.isoformat(), "status": "pending"})
-    await recalculate_reminders_for_task(task_id, new_utc_dt, due_dt_utc)
+    from services.scheduler_service import reset_task_alert_state
+    reset_task_alert_state(task_id)
+
+    if due_dt_utc:
+        await recalculate_reminders_for_task(task_id, new_utc_dt, due_dt_utc)
 
 
 async def recalculate_reminders_for_task(
@@ -1182,6 +1265,8 @@ async def handle_edit_date_text(update: Update, context: ContextTypes.DEFAULT_TY
             due_at_utc = local_to_utc(naive_local_dt, user_tz)
 
             update_task(task_id, user.id, {"due_at": due_at_utc.isoformat(), "status": "pending"})
+            from services.scheduler_service import reset_task_alert_state
+            reset_task_alert_state(task_id)
             await recalculate_reminders_for_task(task_id, due_at_utc)
 
             updated_task = get_task_by_id(task_id, user.id)
@@ -1526,6 +1611,7 @@ def get_edit_task_handlers() -> list:
     # 2. General CallbackQueryHandlers for direct inline updates
     callbacks = [
         CallbackQueryHandler(handle_complete_task_callback, pattern="^task:done:[0-9a-fA-F\\-]+$"),
+        CallbackQueryHandler(handle_snooze_callback, pattern="^task:snooze:[0-9a-fA-F\\-]+(?::\\d+)?$"),
         CallbackQueryHandler(handle_delete_request_callback, pattern="^task:delete:[0-9a-fA-F\\-]+$"),
         CallbackQueryHandler(handle_delete_confirm_callback, pattern="^task:del_confirm:[0-9a-fA-F\\-]+$"),
         

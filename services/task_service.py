@@ -261,6 +261,11 @@ def complete_task_by_id(task_id: str, telegram_user_id: int) -> Optional[Dict[st
         
         # Deactivate associated pending reminders for this completed task
         client.table("reminders").update({"status": "cancelled"}).eq("task_id", task_id).eq("status", "pending").execute()
+        try:
+            from services.scheduler_service import reset_task_alert_state
+            reset_task_alert_state(task_id)
+        except Exception:
+            pass
 
         if not res.data:
             return None
@@ -337,6 +342,11 @@ def delete_task_by_id(task_id: str, telegram_user_id: int) -> bool:
 
         res = client.table("tasks").delete().eq("id", task_id).execute()
         if res.data:
+            try:
+                from services.scheduler_service import reset_task_alert_state
+                reset_task_alert_state(task_id)
+            except Exception:
+                pass
             logger.info("Deleted task %s.", task_id)
             return True
         return False

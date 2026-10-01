@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any, Set
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
@@ -13,9 +15,20 @@ from utils.formatters import format_relative_date, format_time
 
 logger = logging.getLogger(__name__)
 
+# In-memory tracking to guarantee alerts never spam faster than per 5 minutes
+# and that dispatched reminders are never duplicated within a process lifetime
+_last_overdue_alert_time: Dict[str, datetime] = {}
+_dispatched_reminders: Set[str] = set()
+
+
+def reset_task_alert_state(task_id: str) -> None:
+    """Reset the alert throttle state for a task when it is completed, snoozed, or rescheduled."""
+    _last_overdue_alert_time.pop(task_id, None)
+    logger.debug("Reset alert throttle state for task %s", task_id)
+
 
 def format_reminder_message(task: dict, user_timezone: str, reminder_record: Optional[dict] = None) -> str:
-    """Format a highly readable Markdown alert for task reminders, indicating 1st or 2nd Alert."""
+    """Format a highly readable HTML alert for task reminders, indicating 1st or 2nd Alert."""
     title = task.get("title", "Untitled")
     category = task.get("category", "personal").capitalize()
     priority = task.get("priority", "medium")
@@ -56,8 +69,8 @@ def format_reminder_message(task: dict, user_timezone: str, reminder_record: Opt
     msg = (
         f"{alert_header}\n"
         "────────────────\n\n"
-        f"📝 <b>Name:</b> {title}\n"
-        f"📁 <b>Category:</b> {category}\n"
+        f"📝 <b>Name:</b> {html.escape(title)}\n"
+        f"📁 <b>Category:</b> {html.escape(category)}\n"
         f"🚩 <b>Priority:</b> {prio_icon}\n"
         f"📅 <b>Due At:</b> {due_display}\n\n"
         "<i>Don't forget to complete your task! You can manage it with the buttons below:</i>"
@@ -65,16 +78,15 @@ def format_reminder_message(task: dict, user_timezone: str, reminder_record: Opt
     return msg
 
 
-
 async def poll_and_dispatch_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check Supabase for pending reminders, deliver direct alerts, and flag them as sent."""
-    logger.info("Executing background reminder polling check...")
+    logger.debug("Executing background reminder polling check...")
     client = get_supabase_client()
-    now_utc = datetime.now(timezone.utc).isoformat()
+    now_utc_dt = datetime.now(timezone.utc)
+    now_utc = now_utc_dt.isoformat()
 
     try:
         # Fetch pending reminders scheduled for now or in the past
-        # We perform a relational joined query to fetch the associated tasks and users
         res = (
             client.table("reminders")
             .select("*, tasks(*), users(*)")
@@ -97,7 +109,7 @@ async def poll_and_dispatch_reminders(context: ContextTypes.DEFAULT_TYPE) -> Non
         task_data = item.get("tasks")
         user_data = item.get("users")
 
-        # Normalize Postgrest relation results (which can occasionally be lists or single dicts)
+        # Normalize Postgrest relation results
         if isinstance(task_data, list) and task_data:
             task_data = task_data[0]
         if isinstance(user_data, list) and user_data:
@@ -111,10 +123,26 @@ async def poll_and_dispatch_reminders(context: ContextTypes.DEFAULT_TYPE) -> Non
                 pass
             continue
 
-        # Extract Telegram delivery targets and preferences
+        task_id = task_data.get("id")
+        task_status = task_data.get("status", "pending")
+
+        # If task is already completed, do not send reminder
+        if task_status == "completed":
+            logger.info("Task %s is already completed. Cancelling reminder %s.", task_id, reminder_id)
+            try:
+                client.table("reminders").update({"status": "cancelled"}).eq("id", reminder_id).execute()
+            except Exception:
+                pass
+            continue
+
+        # Prevent duplicate in-memory dispatch in case of tight polling loops
+        if reminder_id in _dispatched_reminders:
+            continue
+        _dispatched_reminders.add(reminder_id)
+
+        # Extract Telegram delivery targets
         telegram_user_id = user_data.get("telegram_user_id")
         user_timezone = user_data.get("timezone", "Asia/Phnom_Penh")
-        task_id = task_data.get("id")
 
         if not telegram_user_id:
             logger.warning("User entry for reminder %s lacks telegram_user_id. Skipping.", reminder_id)
@@ -123,11 +151,15 @@ async def poll_and_dispatch_reminders(context: ContextTypes.DEFAULT_TYPE) -> Non
         # Format message content
         text = format_reminder_message(task_data, user_timezone, reminder_record=item)
 
-        # Build inline action buttons for immediate, non-intrusive alert handling
+        # Inline action buttons: Mark Completed, Snooze 5 min, Change Date, Change Hour, Main Menu
         keyboard = [
             [
                 InlineKeyboardButton("✅ Mark Completed", callback_data=f"task:done:{task_id}"),
-                InlineKeyboardButton("📅 Reschedule", callback_data=f"task:resched:{task_id}")
+                InlineKeyboardButton("⏰ Snooze (5 min)", callback_data=f"task:snooze:{task_id}:5")
+            ],
+            [
+                InlineKeyboardButton("📅 Change Date", callback_data=f"edit:field:date:{task_id}"),
+                InlineKeyboardButton("⏰ Change Hour", callback_data=f"edit:field:time:{task_id}")
             ],
             [
                 InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")
@@ -143,15 +175,18 @@ async def poll_and_dispatch_reminders(context: ContextTypes.DEFAULT_TYPE) -> Non
                 reply_markup=markup,
                 parse_mode="HTML"
             )
-            # Flag reminder as successfully delivered
-            client.table("reminders").update({
-                "status": "sent",
-                "sent_at": datetime.utcnow().isoformat()
-            }).eq("id", reminder_id).execute()
             logger.info("Successfully delivered reminder %s to telegram user %s", reminder_id, telegram_user_id)
 
+            # Flag reminder as successfully delivered in Supabase
+            try:
+                client.table("reminders").update({
+                    "status": "sent",
+                    "sent_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", reminder_id).execute()
+            except Exception as upd_err:
+                logger.error("Failed to mark reminder %s as sent in database: %s", reminder_id, upd_err)
+
         except Exception as exc:
-            # Handle user blocks or chats deleted gracefully
             logger.error(
                 "Failed to deliver reminder %s to user %s. Flagging as cancelled. Error: %s",
                 reminder_id,
@@ -165,7 +200,7 @@ async def poll_and_dispatch_reminders(context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 def format_overdue_alert_message(task: dict, user_timezone: str) -> str:
-    """Format a highly readable Markdown alert for overdue tasks."""
+    """Format a highly readable HTML alert for overdue tasks."""
     title = task.get("title", "Untitled")
     category = task.get("category", "personal").capitalize()
     priority = task.get("priority", "medium")
@@ -190,31 +225,33 @@ def format_overdue_alert_message(task: dict, user_timezone: str) -> str:
     msg = (
         "🚨 <b>OVERDUE TASK ALERT</b>\n"
         "──────────────────\n\n"
-        f"📝 <b>Name:</b> {title}\n"
-        f"📁 <b>Category:</b> {category}\n"
+        f"📝 <b>Name:</b> {html.escape(title)}\n"
+        f"📁 <b>Category:</b> {html.escape(category)}\n"
         f"🚩 <b>Priority:</b> {prio_icon}\n"
         f"📅 <b>Due At:</b> {due_display}\n\n"
-        "⚠️ <i>This task has passed its due time and is now marked as overdue. Please complete or reschedule it!</i>"
+        "⚠️ <i>This task has passed its due time and is now marked as overdue. "
+        "Please complete it or reschedule the date and hour using the buttons below:</i>"
     )
     return msg
 
 
 async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check Supabase for overdue tasks with status 'pending' periodically, update their status to 'overdue', and trigger direct alerts immediately.
+    """Check Supabase for overdue tasks and remind the user every 5 minutes until completed or rescheduled.
     
-    Prevents duplicate alerts by checking for an 'overdue_sent' sentinel record in the reminders table.
+    Guarantees reminders repeat per 5 minutes (300 seconds), preventing repeated 1-minute alert loops.
+    Provides direct action buttons for Mark Completed, Snooze (5 min), Change Date, and Change Hour.
     """
-    logger.info("Executing periodic check for overdue tasks (check_pending_reminders)...")
+    logger.debug("Executing 5-minute overdue reminder check...")
     client = get_supabase_client()
     now_utc_dt = datetime.now(timezone.utc)
     now_utc = now_utc_dt.isoformat()
 
     try:
-        # Fetch tasks with 'pending' status whose due_at has passed
+        # Fetch pending or overdue tasks whose due_at has passed
         res = (
             client.table("tasks")
             .select("*, users(*)")
-            .eq("status", "pending")
+            .in_("status", ["pending", "overdue"])
             .lt("due_at", now_utc)
             .execute()
         )
@@ -226,14 +263,12 @@ async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not overdue_tasks:
         return
 
-    logger.info("Found %d pending overdue tasks to transition and alert.", len(overdue_tasks))
-
     for task in overdue_tasks:
         task_id = task.get("id")
         user_data = task.get("users")
         due_at = task.get("due_at")
 
-        if not due_at:
+        if not due_at or not task_id:
             continue
 
         # Normalize relation formats
@@ -251,55 +286,41 @@ async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.warning("User for overdue task %s has no telegram_user_id. Skipping.", task_id)
             continue
 
-        # 0. Prevent double alerting: check if we already sent an overdue alert for this specific due_at timestamp
-        try:
-            dup_check = (
-                client.table("reminders")
-                .select("id")
-                .eq("task_id", task_id)
-                .eq("remind_at", due_at)
-                .eq("status", "sent")
-                .execute()
-            )
-            if dup_check.data:
-                logger.info("Overdue alert sentinel already exists for task %s at %s. Skipping duplicate alert.", task_id, due_at)
+        # THROTTLE: Enforce exact 5-minute reminder interval
+        # If an alert was sent less than 5 minutes (300 seconds) ago, skip
+        last_alert = _last_overdue_alert_time.get(task_id)
+        if last_alert:
+            elapsed = (now_utc_dt - last_alert).total_seconds()
+            if elapsed < 300:  # 5 minutes
+                logger.debug("Throttling overdue alert for task %s (sent %.0fs ago, waiting for 300s)", task_id, elapsed)
                 continue
-        except Exception as exc:
-            logger.error("Error checking duplicate overdue sentinel for task %s: %s", task_id, exc)
 
-        # 1. Update status to 'overdue' in Supabase (may fail if db constraints prevent it, but we still try)
+        # Record this dispatch time to enforce the 5-minute reminder interval
+        _last_overdue_alert_time[task_id] = now_utc_dt
+
+        # Attempt to transition status to 'overdue' in Supabase
         try:
             client.table("tasks").update({"status": "overdue"}).eq("id", task_id).execute()
-            logger.info("Successfully transitioned task %s to 'overdue' in Supabase.", task_id)
         except Exception as exc:
-            logger.error("Could not update task %s to 'overdue' status in Supabase (check DB constraints): %s", task_id, exc)
+            logger.debug("Could not update task %s to 'overdue' in DB (may need constraint update): %s", task_id, exc)
 
-        # 2. Automatically cancel any general scheduled reminders for this task
+        # Cancel any obsolete pending reminders for this passed task
         try:
             client.table("reminders").update({"status": "cancelled"}).eq("task_id", task_id).eq("status", "pending").execute()
         except Exception as exc:
-            logger.error("Failed to cancel pending reminders for overdue task %s: %s", task_id, exc)
+            logger.debug("Failed to cancel pending reminders for overdue task %s: %s", task_id, exc)
 
-        # 3. Create a sent alert sentinel in reminders table to ensure we NEVER double alert for this task's due_at
-        try:
-            client.table("reminders").insert({
-                "task_id": task_id,
-                "user_id": user_data.get("id"),
-                "remind_at": due_at,
-                "status": "sent",
-                "sent_at": datetime.utcnow().isoformat()
-            }).execute()
-            logger.info("Created overdue alert sentinel in reminders for task %s.", task_id)
-        except Exception as exc:
-            logger.error("Failed to create overdue sentinel in reminders table for task %s: %s", task_id, exc)
-
-        # 4. Deliver immediate overdue notification message to the Telegram user
+        # Deliver overdue notification message with full reschedule and snooze controls
         text = format_overdue_alert_message(task, user_timezone)
 
         keyboard = [
             [
                 InlineKeyboardButton("✅ Mark Completed", callback_data=f"task:done:{task_id}"),
-                InlineKeyboardButton("📅 Reschedule", callback_data=f"task:resched:{task_id}")
+                InlineKeyboardButton("⏰ Snooze (5 min)", callback_data=f"task:snooze:{task_id}:5")
+            ],
+            [
+                InlineKeyboardButton("📅 Change Date", callback_data=f"edit:field:date:{task_id}"),
+                InlineKeyboardButton("⏰ Change Hour", callback_data=f"edit:field:time:{task_id}")
             ],
             [
                 InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")
@@ -314,7 +335,6 @@ async def check_pending_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=markup,
                 parse_mode="HTML"
             )
-            logger.info("Successfully triggered immediate overdue alert for task %s to user %s", task_id, telegram_user_id)
+            logger.info("Delivered 5-minute overdue reminder for task %s to user %s", task_id, telegram_user_id)
         except Exception as exc:
-            logger.error("Failed to deliver immediate overdue alert for task %s to user %s: %s", task_id, telegram_user_id, exc)
-
+            logger.error("Failed to deliver overdue alert for task %s to user %s: %s", task_id, telegram_user_id, exc)
